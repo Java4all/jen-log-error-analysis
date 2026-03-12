@@ -138,17 +138,56 @@ def get_config() -> AppConfig:
 
     resolved = _resolve_env(raw)
 
-    # Override with env vars (convenience shortcuts)
-    if "ANTHROPIC_API_KEY" in os.environ:
-        resolved.setdefault("ai", {}).setdefault("anthropic", {})["api_key"] = os.environ["ANTHROPIC_API_KEY"]
-    if "GITHUB_TOKEN" in os.environ:
-        resolved.setdefault("github", {})["token"] = os.environ["GITHUB_TOKEN"]
-    if "AI_PROVIDER" in os.environ:
-        resolved.setdefault("ai", {})["provider"] = os.environ["AI_PROVIDER"]
-    # Support both PRIVATE_ONLY_MODE and legacy ISOLATED_MODE env vars
-    if os.environ.get("PRIVATE_ONLY_MODE", "").lower() in ("1", "true", "yes"):
-        resolved.setdefault("network", {})["private_only_mode"] = True
-    if os.environ.get("ISOLATED_MODE", "").lower() in ("1", "true", "yes"):
+    # ---------------------------------------------------------------------------
+    # Override config.yaml values with environment variables.
+    # Priority: env var > config.yaml > built-in default
+    # All vars are passed into the container via docker-compose.yml environment:
+    # ---------------------------------------------------------------------------
+
+    def _env(key: str, default: str = "") -> str:
+        return os.environ.get(key, default).strip()
+
+    def _bool_env(key: str) -> bool:
+        return _env(key).lower() in ("1", "true", "yes")
+
+    # -- AI provider --
+    if _env("AI_PROVIDER"):
+        resolved.setdefault("ai", {})["provider"] = _env("AI_PROVIDER")
+
+    # -- Anthropic --
+    if _env("ANTHROPIC_API_KEY"):
+        resolved.setdefault("ai", {}).setdefault("anthropic", {})["api_key"] = _env("ANTHROPIC_API_KEY")
+
+    # -- Ollama --
+    if _env("OLLAMA_BASE_URL"):
+        resolved.setdefault("ai", {}).setdefault("ollama", {})["base_url"] = _env("OLLAMA_BASE_URL")
+    if _env("OLLAMA_MODEL"):
+        resolved.setdefault("ai", {}).setdefault("ollama", {})["model"] = _env("OLLAMA_MODEL")
+    if _env("OLLAMA_TIMEOUT"):
+        resolved.setdefault("ai", {}).setdefault("ollama", {})["timeout"] = int(_env("OLLAMA_TIMEOUT", "120"))
+
+    # -- Private AI endpoint --
+    if _env("PRIVATE_AI_BASE_URL"):
+        resolved.setdefault("ai", {}).setdefault("private", {})["base_url"] = _env("PRIVATE_AI_BASE_URL")
+    if _env("PRIVATE_AI_API_KEY"):
+        resolved.setdefault("ai", {}).setdefault("private", {})["api_key"] = _env("PRIVATE_AI_API_KEY")
+    if _env("PRIVATE_AI_MODEL"):
+        resolved.setdefault("ai", {}).setdefault("private", {})["model"] = _env("PRIVATE_AI_MODEL")
+
+    # -- GitHub --
+    if _env("GITHUB_TOKEN"):
+        resolved.setdefault("github", {})["token"] = _env("GITHUB_TOKEN")
+    if _env("GITHUB_TYPE"):
+        resolved.setdefault("github", {})["type"] = _env("GITHUB_TYPE")
+    # GitHub Enterprise: if GITHUB_ENTERPRISE_URL is set, inject it into the first repo
+    if _env("GITHUB_ENTERPRISE_URL"):
+        repos = resolved.setdefault("github", {}).setdefault("repos", [])
+        if repos:
+            repos[0]["url"] = _env("GITHUB_ENTERPRISE_URL")
+
+    # -- Network / isolation --
+    # Support PRIVATE_ONLY_MODE and legacy ISOLATED_MODE
+    if _bool_env("PRIVATE_ONLY_MODE") or _bool_env("ISOLATED_MODE"):
         resolved.setdefault("network", {})["private_only_mode"] = True
 
     return AppConfig(**resolved)

@@ -30,9 +30,24 @@ services:
       - ./config:/app/config:ro
       - config_data:/app/config_rw
     environment:
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      # -- AI provider --
       - AI_PROVIDER=${AI_PROVIDER:-anthropic}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # -- Ollama --
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-codellama:13b}
+      - OLLAMA_TIMEOUT=${OLLAMA_TIMEOUT:-120}
+      # -- Private AI endpoint --
+      - PRIVATE_AI_BASE_URL=${PRIVATE_AI_BASE_URL:-}
+      - PRIVATE_AI_API_KEY=${PRIVATE_AI_API_KEY:-}
+      - PRIVATE_AI_MODEL=${PRIVATE_AI_MODEL:-}
+      # -- GitHub --
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITHUB_TYPE=${GITHUB_TYPE:-public}
+      - GITHUB_ENTERPRISE_URL=${GITHUB_ENTERPRISE_URL:-}
+      # -- Network / isolation --
+      - PRIVATE_ONLY_MODE=${PRIVATE_ONLY_MODE:-false}
+      - ISOLATED_MODE=${ISOLATED_MODE:-false}
     networks:
       - analyzer-net
     healthcheck:
