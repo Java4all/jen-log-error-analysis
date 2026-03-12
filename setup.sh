@@ -51,10 +51,15 @@ echo   ""
 echo   "  [5]  ISOLATED, GPU  (air-gapped + NVIDIA GPU)"
 echo   "       Ollama GPU + Docker internal network + ISOLATED_MODE=true."
 echo   ""
-echo   "  [6]  Stop all containers"
-echo   "  [7]  Show container status"
-echo   "  [8]  Tail logs"
-echo   "  [9]  Open app in browser"
+echo   "  --- Pre-built images (pull from registry, no build required) ---"
+echo   "  [6]  Pre-built, cloud AI     (IMAGE_REGISTRY in .env required)"
+echo   "  [7]  Pre-built, Ollama CPU   (recommended for Mac -- pull only)"
+echo   "  [8]  Pre-built, isolated     (private-only mode + Ollama CPU)"
+echo   ""
+echo   "  [9]  Stop all containers"
+echo   "  [10] Show container status"
+echo   "  [11] Tail logs"
+echo   "  [12] Open app in browser"
 echo   "  [q]  Quit"
 echo   ""
 read -p "  Enter choice: " CHOICE
@@ -102,21 +107,60 @@ case "$CHOICE" in
         echo ""; ok "Open: http://localhost:$FP"
         ;;
     6)
+        header "Starting pre-built stack (cloud AI)..."
+        info "Pulls images from IMAGE_REGISTRY in .env -- no build required."
+        REG=$(get_port IMAGE_REGISTRY "")
+        if [ -z "$REG" ]; then
+            warn "IMAGE_REGISTRY is not set in .env -- set it before running this mode."
+            exit 1
+        fi
+        make up-prebuilt
+        FP=$(get_port FRONTEND_PORT 3000)
+        echo ""; ok "Open: http://localhost:$FP"
+        ;;
+    7)
+        header "Starting pre-built stack (Ollama CPU)..."
+        info "Pulls images from IMAGE_REGISTRY in .env -- no build required."
+        info "Recommended for Mac: no build tools needed, runs Ollama locally."
+        REG=$(get_port IMAGE_REGISTRY "")
+        if [ -z "$REG" ]; then
+            warn "IMAGE_REGISTRY is not set in .env -- set it before running this mode."
+            exit 1
+        fi
+        warn "First run downloads the Ollama model -- may take several minutes."
+        make up-prebuilt-ollama
+        FP=$(get_port FRONTEND_PORT 3000)
+        echo ""; ok "Open: http://localhost:$FP"
+        ;;
+    8)
+        header "Starting pre-built isolated stack (Ollama CPU, private-only)..."
+        info "Pulls images from IMAGE_REGISTRY in .env -- no build required."
+        info "Public cloud (Anthropic + github.com) is blocked."
+        REG=$(get_port IMAGE_REGISTRY "")
+        if [ -z "$REG" ]; then
+            warn "IMAGE_REGISTRY is not set in .env -- set it before running this mode."
+            exit 1
+        fi
+        make up-prebuilt-isolated
+        FP=$(get_port FRONTEND_PORT 3000)
+        echo ""; ok "Open: http://localhost:$FP"
+        ;;
+    9)
         header "Stopping all containers..."
         docker compose down
         docker compose --profile ollama down 2>/dev/null || true
         make down-isolated 2>/dev/null || true
         ok "Done."
         ;;
-    7)
+    10)
         header "Container status"
         docker compose ps
         ;;
-    8)
+    11)
         header "Tailing logs (Ctrl+C to stop)..."
         docker compose logs -f
         ;;
-    9)
+    12)
         FP=$(get_port FRONTEND_PORT 3000)
         URL="http://localhost:$FP"
         header "Opening $URL"
