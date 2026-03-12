@@ -501,10 +501,8 @@ Be precise: quote log lines and source code line numbers. Format in markdown."""
 
     errors_text = ""
     for idx, err in enumerate(result.errors[:10], 1):
-        ctx = "
-".join(err.context_lines)
-        trace = "
-".join(err.stack_trace[:15]) if err.stack_trace else "(no stack trace)"
+        ctx = "\n".join(err.context_lines)
+        trace = "\n".join(err.stack_trace[:15]) if err.stack_trace else "(no stack trace)"
         errors_text += f"""
 ### Error {idx}: {err.error_type}
 - **Message**: {err.message}
@@ -534,12 +532,10 @@ Be precise: quote log lines and source code line numbers. Format in markdown."""
 
     # Include a log window around the first error
     first_error_line = result.errors[0].line_number if result.errors else 0
-    log_lines = raw_log.split("
-")
+    log_lines = raw_log.split("\n")
     window_start = max(0, first_error_line - 20)
     window_end = min(len(log_lines), first_error_line + 40)
-    log_window = "
-".join(log_lines[window_start:window_end])[:max_context_chars]
+    log_window = "\n".join(log_lines[window_start:window_end])[:max_context_chars]
 
     user = f"""Diagnose this Jenkins build failure:
 

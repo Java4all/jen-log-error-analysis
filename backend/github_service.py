@@ -338,24 +338,17 @@ def build_error_source_context(
             label = " *** IMPLICATED IN FAILURE ***" if is_failed else ""
 
             block = (
-                f"
-## {'[FAILED] ' if is_failed else ''}Method: {sig.name} [{sig.language}]"
-                f"{label}
-"
-                f"File: {sig.file}  |  Line: {sig.line_number}  |  Repo: {sig.repo}
-"
-                f"```{sig.language}
-{body}
-```
-"
+                f"\n## {'[FAILED] ' if is_failed else ''}Method: {sig.name} [{sig.language}]"
+                f"{label}\n"
+                f"File: {sig.file}  |  Line: {sig.line_number}  |  Repo: {sig.repo}\n"
+                f"```{sig.language}\n{body}\n```\n"
             )
             if total_chars + len(block) > max_chars:
                 break
             lines.append(block)
             total_chars += len(block)
 
-    return "
-".join(lines) if lines else ""
+    return "\n".join(lines) if lines else ""
 
 
 async def fetch_full_method_bodies(
@@ -399,12 +392,10 @@ async def fetch_full_method_bodies(
                 "main",
             )
             source = await client.get_file(owner, repo_name, sig.file, branch)
-            lines = source.split("
-")
+            lines = source.split("\n")
             start = max(0, sig.line_number - 1)
             end = min(len(lines), start + max_lines)
-            return method_name, "
-".join(lines[start:end])
+            return method_name, "\n".join(lines[start:end])
         except Exception as e:
             logger.debug(f"Full body fetch failed for {method_name}: {e}")
             return method_name, sig.source_snippet
