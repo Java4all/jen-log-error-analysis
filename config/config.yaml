@@ -4,7 +4,7 @@
 # -- AI Backend ---------------------------------------------------------------
 ai:
   # Options: "anthropic" | "ollama" | "private"
-  provider: "ollama"
+  provider: "anthropic"
 
   # GPU acceleration (used when provider is "ollama" or "private")
   gpu_enabled: true
@@ -32,7 +32,7 @@ ai:
 # -- GitHub Integration --------------------------------------------------------
 github:
   # Options: "public" | "private"
-  type: "private"
+  type: "public"
   token: ""               # or set env: GITHUB_TOKEN (required for private)
   timeout: 30
 
@@ -101,7 +101,7 @@ network:
   #
   # Activate via this flag or env var: PRIVATE_ONLY_MODE=true
   # Legacy env var ISOLATED_MODE=true also works.
-  private_only_mode: true
+  private_only_mode: false
 
   # Batch processing for large logs (10k+ lines)
   # auto:   batch when log exceeds batch_threshold_lines (recommended)

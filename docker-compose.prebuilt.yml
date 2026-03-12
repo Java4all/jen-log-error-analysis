@@ -1,0 +1,53 @@
+# -----------------------------------------------------------------------------
+# Pre-built image overlay -- use instead of building from source.
+#
+# Designed for restricted / air-gapped environments where:
+#   - Docker build is not available or not permitted
+#   - The Docker daemon has no access to npmjs, pypi, or apt mirrors
+#   - Images were built once elsewhere and pushed to a private registry
+#
+# How to use
+# ----------
+# 1. On a machine with internet/build access, run:
+#      make push-images               (Linux/macOS)
+#      .\make.ps1 push-images         (Windows)
+#    This builds and pushes to the registry defined in .env (IMAGE_REGISTRY).
+#
+# 2. In the restricted environment, pull and run any existing mode unchanged:
+#      docker compose -f docker-compose.yml \
+#                     -f docker-compose.prebuilt.yml \
+#                     up
+#
+#    Or use the shortcut make targets (all existing modes are covered):
+#      make up-prebuilt
+#      make up-prebuilt-ollama
+#      make up-prebuilt-gpu
+#      make up-prebuilt-isolated
+#      make up-prebuilt-gpu-isolated
+#
+# Registry / image configuration (.env or environment variables)
+# --------------------------------------------------------------
+#   IMAGE_REGISTRY   Private registry host          e.g. registry.mycompany.com
+#   IMAGE_REPO       Repository prefix              e.g. devops/jenkins-analyzer
+#   IMAGE_TAG        Image tag to pull              default: latest
+#
+# Full image references pulled:
+#   ${IMAGE_REGISTRY}/${IMAGE_REPO}/api:${IMAGE_TAG}
+#   ${IMAGE_REGISTRY}/${IMAGE_REPO}/frontend:${IMAGE_TAG}
+#
+# If IMAGE_REGISTRY is empty, images are resolved locally (useful for
+# docker save / docker load workflows without a registry).
+# -----------------------------------------------------------------------------
+
+name: jenkins-analyzer
+
+services:
+  api:
+    build: !reset null          # suppress the build: directive from base file
+    image: ${IMAGE_REGISTRY:+${IMAGE_REGISTRY}/}${IMAGE_REPO:-jenkins-analyzer}/api:${IMAGE_TAG:-latest}
+    pull_policy: ${IMAGE_PULL_POLICY:-if_not_present}
+
+  frontend:
+    build: !reset null
+    image: ${IMAGE_REGISTRY:+${IMAGE_REGISTRY}/}${IMAGE_REPO:-jenkins-analyzer}/frontend:${IMAGE_TAG:-latest}
+    pull_policy: ${IMAGE_PULL_POLICY:-if_not_present}

@@ -130,6 +130,17 @@ function Cmd-Help {
     Write-Gray "  .\make.ps1 up-gpu-isolated     Ollama GPU, internet blocked"
     Write-Gray "  .\make.ps1 down-isolated       stop isolated stack"
     Write-Host ""
+    Write-Host "  Pre-built images (restricted/air-gapped):"
+    Write-Host "  Multi-arch / pre-built images:"
+    Write-Gray "  .\make.ps1 buildx-setup            create multi-arch builder (once per machine)"
+    Write-Gray "  .\make.ps1 push-images             build amd64+arm64 images and push"
+    Write-Gray "  .\make.ps1 push-images-amd64       build amd64 only"
+    Write-Gray "  .\make.ps1 push-images-arm64       build arm64 only"
+    Write-Gray "  .\make.ps1 up-prebuilt             run pre-built images (cloud AI)"
+    Write-Gray "  .\make.ps1 up-prebuilt-ollama      run pre-built + Ollama CPU"
+    Write-Gray "  .\make.ps1 up-prebuilt-gpu         run pre-built + Ollama GPU"
+    Write-Gray "  .\make.ps1 up-prebuilt-isolated    run pre-built + private-only mode"
+    Write-Host ""
     Write-Host "  LOCAL OLLAMA, CPU MODE  (any machine, including Mac)"
     Write-Gray "  .\make.ps1 up-ollama       build + start + Ollama on CPU"
     Write-Gray "  .\make.ps1 down-ollama     stop"
@@ -430,6 +441,64 @@ function Cmd-DownIsolated {
 }
 
 # =============================================================================
+# PRE-BUILT IMAGE COMMANDS
+# =============================================================================
+function Cmd-BuildxSetup {
+    Write-Host "[>]  Setting up multi-arch buildx builder..." -ForegroundColor Cyan
+    & "$PSScriptRoot\scripts\push-images.ps1" -Setup
+}
+
+function Cmd-PushImages {
+    Write-Host "[>]  Building multi-arch (amd64+arm64) images and pushing..." -ForegroundColor Cyan
+    & "$PSScriptRoot\scripts\push-images.ps1"
+}
+
+function Cmd-PushImagesAmd64 {
+    Write-Host "[>]  Building amd64-only images and pushing..." -ForegroundColor Cyan
+    & "$PSScriptRoot\scripts\push-images.ps1" -Amd64Only
+}
+
+function Cmd-PushImagesArm64 {
+    Write-Host "[>]  Building arm64-only images and pushing..." -ForegroundColor Cyan
+    & "$PSScriptRoot\scripts\push-images.ps1" -Arm64Only
+}
+
+function Cmd-UpPrebuilt {
+    Assert-Docker
+    Write-Host "[>]  Starting pre-built stack (cloud AI)..." -ForegroundColor Cyan
+    docker compose -f docker-compose.yml -f docker-compose.prebuilt.yml up -d
+    Write-Host "[OK] Stack running on http://localhost:$(if ($env:FRONTEND_PORT) { $env:FRONTEND_PORT } else { '3000' })" -ForegroundColor Green
+}
+
+function Cmd-UpPrebuiltOllama {
+    Assert-Docker
+    Write-Host "[>]  Starting pre-built stack (Ollama CPU)..." -ForegroundColor Cyan
+    docker compose -f docker-compose.yml -f docker-compose.prebuilt.yml --profile ollama up -d
+    Write-Host "[OK] Stack running on http://localhost:$(if ($env:FRONTEND_PORT) { $env:FRONTEND_PORT } else { '3000' })" -ForegroundColor Green
+}
+
+function Cmd-UpPrebuiltGpu {
+    Assert-Docker
+    Write-Host "[>]  Starting pre-built stack (Ollama GPU)..." -ForegroundColor Cyan
+    docker compose -f docker-compose.yml -f docker-compose.gpu.yml -f docker-compose.prebuilt.yml --profile gpu up -d
+    Write-Host "[OK] Stack running on http://localhost:$(if ($env:FRONTEND_PORT) { $env:FRONTEND_PORT } else { '3000' })" -ForegroundColor Green
+}
+
+function Cmd-UpPrebuiltIsolated {
+    Assert-Docker
+    Write-Host "[>]  Starting pre-built private-only stack (Ollama CPU)..." -ForegroundColor Cyan
+    docker compose -f docker-compose.yml -f docker-compose.prebuilt.yml -f docker-compose.isolated.yml --profile ollama up -d
+    Write-Host "[OK] Pre-built private-only stack running" -ForegroundColor Green
+}
+
+function Cmd-UpPrebuiltGpuIsolated {
+    Assert-Docker
+    Write-Host "[>]  Starting pre-built private-only stack (Ollama GPU)..." -ForegroundColor Cyan
+    docker compose -f docker-compose.yml -f docker-compose.gpu.yml -f docker-compose.prebuilt.yml -f docker-compose.isolated.yml --profile gpu up -d
+    Write-Host "[OK] Pre-built private-only GPU stack running" -ForegroundColor Green
+}
+
+# =============================================================================
 # ROUTER
 # =============================================================================
 switch ($Command.ToLower()) {
@@ -457,6 +526,15 @@ switch ($Command.ToLower()) {
     "check-gpu"     { Cmd-CheckGpu }
     "clean"         { Cmd-Clean }
     "nuke"          { Cmd-Nuke }
+    "buildx-setup"             { Cmd-BuildxSetup }
+    "push-images"              { Cmd-PushImages }
+    "push-images-amd64"        { Cmd-PushImagesAmd64 }
+    "push-images-arm64"        { Cmd-PushImagesArm64 }
+    "up-prebuilt"              { Cmd-UpPrebuilt }
+    "up-prebuilt-ollama"       { Cmd-UpPrebuiltOllama }
+    "up-prebuilt-gpu"          { Cmd-UpPrebuiltGpu }
+    "up-prebuilt-isolated"     { Cmd-UpPrebuiltIsolated }
+    "up-prebuilt-gpu-isolated" { Cmd-UpPrebuiltGpuIsolated }
     default {
         Write-Red "Unknown command: $Command"
         Write-Host ""

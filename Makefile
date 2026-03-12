@@ -10,6 +10,9 @@ COMPOSE_ISOLATED_GPU    = docker compose -f docker-compose.yml -f docker-compose
 
 .PHONY: help setup up up-ollama up-gpu down down-ollama down-gpu \
         up-ollama-isolated up-gpu-isolated down-isolated \
+        buildx-setup push-images push-images-amd64 push-images-arm64 push-images-tag \
+        up-prebuilt up-prebuilt-ollama up-prebuilt-gpu \
+        up-prebuilt-isolated up-prebuilt-gpu-isolated \
         build logs logs-api logs-frontend logs-ollama restart shell-api ps health \
         pull-model clean nuke
 
@@ -158,6 +161,55 @@ pull-model:
 	curl -X POST http://localhost:$$(grep OLLAMA_PORT .env 2>/dev/null | cut -d= -f2 || echo 11434)/api/pull \
 		-H "Content-Type: application/json" \
 		-d "{\"name\": \"$$MODEL\"}"
+
+# -- Pre-built images (restricted / air-gapped) --------------------------------
+COMPOSE_PREBUILT         = docker compose -f docker-compose.yml -f docker-compose.prebuilt.yml
+COMPOSE_PREBUILT_OLLAMA  = $(COMPOSE_PREBUILT) --profile ollama
+COMPOSE_PREBUILT_GPU     = docker compose -f docker-compose.yml -f docker-compose.gpu.yml -f docker-compose.prebuilt.yml --profile gpu
+COMPOSE_PREBUILT_ISO     = $(COMPOSE_PREBUILT) -f docker-compose.isolated.yml --profile ollama
+COMPOSE_PREBUILT_GPU_ISO = $(COMPOSE_PREBUILT_GPU) -f docker-compose.isolated.yml
+
+buildx-setup: ## Create the multi-arch docker buildx builder (run once per build machine)
+	@bash scripts/push-images.sh --setup
+
+push-images: ## Build multi-arch images (amd64+arm64) and push to private registry
+	@bash scripts/push-images.sh
+
+push-images-amd64: ## Build amd64-only images and push (for x86/Intel servers)
+	@bash scripts/push-images.sh --amd64-only
+
+push-images-arm64: ## Build arm64-only images and push (for Apple Silicon, Graviton, RPi)
+	@bash scripts/push-images.sh --arm64-only
+
+push-images-tag: ## Build multi-arch images with a custom tag  (TAG=v1.2 make push-images-tag)
+	@bash scripts/push-images.sh --tag $(TAG)
+
+up-prebuilt: ## Pull pre-built images and start stack (cloud AI, no Ollama)
+	@echo "[>]  Starting pre-built stack (cloud AI)..."
+	@$(COMPOSE_PREBUILT) up -d
+	@echo "[OK] Stack running on http://localhost:$${FRONTEND_PORT:-3000}"
+
+up-prebuilt-ollama: ## Pull pre-built images + Ollama CPU
+	@echo "[>]  Starting pre-built stack (Ollama CPU)..."
+	@$(COMPOSE_PREBUILT_OLLAMA) up -d
+	@echo "[OK] Stack running on http://localhost:$${FRONTEND_PORT:-3000}"
+
+up-prebuilt-gpu: ## Pull pre-built images + Ollama GPU
+	@echo "[>]  Starting pre-built stack (Ollama GPU)..."
+	@$(COMPOSE_PREBUILT_GPU) up -d
+	@echo "[OK] Stack running on http://localhost:$${FRONTEND_PORT:-3000}"
+
+up-prebuilt-isolated: ## Pre-built + private-only mode (Ollama CPU, public cloud blocked)
+	@echo "[>]  Starting pre-built private-only stack (Ollama CPU)..."
+	@$(COMPOSE_PREBUILT_ISO) up -d
+	@echo "[OK] Pre-built private-only stack running"
+
+up-prebuilt-gpu-isolated: ## Pre-built + private-only mode (Ollama GPU, public cloud blocked)
+	@echo "[>]  Starting pre-built private-only stack (Ollama GPU)..."
+	@$(COMPOSE_PREBUILT_GPU_ISO) up -d
+	@echo "[OK] Pre-built private-only GPU stack running"
+
+.PHONY: buildx-setup push-images push-images-amd64 push-images-arm64 push-images-tag up-prebuilt up-prebuilt-ollama up-prebuilt-gpu up-prebuilt-isolated up-prebuilt-gpu-isolated
 
 # -- Cleanup -----------------------------------------------------------------
 clean:
