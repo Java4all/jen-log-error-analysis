@@ -26,9 +26,27 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# Load .env if present (without overriding existing env vars)
+# Load .env -- only set vars that are not already set in the environment
+# (set -a; source .env would overwrite existing shell vars -- we don't want that)
 if [ -f .env ]; then
-  set -a; source .env; set +a
+  while IFS= read -r line || [ -n "$line" ]; do
+    # Skip blank lines and comments
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    # Match KEY=VALUE (no spaces around =)
+    if [[ "$line" =~ ^([^=[:space:]]+)=(.*)$ ]]; then
+      key="${BASH_REMATCH[1]}"
+      val="${BASH_REMATCH[2]}"
+      # Strip surrounding quotes
+      val="${val%"}"
+      val="${val#"}"
+      val="${val%'}"
+      val="${val#'}"
+      # Only export if not already set in the environment
+      if [[ -z "${!key+x}" ]]; then
+        export "$key=$val"
+      fi
+    fi
+  done < .env
 fi
 
 # -- Parse args ----------------------------------------------------------------
@@ -51,6 +69,8 @@ IMAGE_REGISTRY="${IMAGE_REGISTRY:-}"
 IMAGE_REPO="${IMAGE_REPO:-jenkins-analyzer}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
 BUILDER_NAME="jenkins-analyzer-builder"
+
+echo "  [debug] Registry='${IMAGE_REGISTRY:-<empty>}'  Repo='${IMAGE_REPO}'  Tag='${IMAGE_TAG}'"
 
 # -- Setup: create multi-arch builder ------------------------------------------
 setup_builder() {

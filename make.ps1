@@ -443,24 +443,40 @@ function Cmd-DownIsolated {
 # =============================================================================
 # PRE-BUILT IMAGE COMMANDS
 # =============================================================================
+function Get-ImageArgs {
+    # Load .env then return -Registry, -Repo, -Tag values
+    Load-Env
+    $reg  = Get-EnvVal "IMAGE_REGISTRY" ""
+    $repo = Get-EnvVal "IMAGE_REPO"     "jenkins-analyzer"
+    $tag  = Get-EnvVal "IMAGE_TAG"      "latest"
+    return @{ Registry = $reg; Repo = $repo; Tag = $tag }
+}
+
 function Cmd-BuildxSetup {
+    Load-Env
     Write-Host "[>]  Setting up multi-arch buildx builder..." -ForegroundColor Cyan
     & "$PSScriptRoot\scripts\push-images.ps1" -Setup
 }
 
 function Cmd-PushImages {
+    $a = Get-ImageArgs
     Write-Host "[>]  Building multi-arch (amd64+arm64) images and pushing..." -ForegroundColor Cyan
-    & "$PSScriptRoot\scripts\push-images.ps1"
+    Write-Host "     Registry : $($a.Registry)"
+    Write-Host "     Repo     : $($a.Repo)"
+    Write-Host "     Tag      : $($a.Tag)"
+    & "$PSScriptRoot\scripts\push-images.ps1" -Registry $a.Registry -Repo $a.Repo -Tag $a.Tag
 }
 
 function Cmd-PushImagesAmd64 {
+    $a = Get-ImageArgs
     Write-Host "[>]  Building amd64-only images and pushing..." -ForegroundColor Cyan
-    & "$PSScriptRoot\scripts\push-images.ps1" -Amd64Only
+    & "$PSScriptRoot\scripts\push-images.ps1" -Registry $a.Registry -Repo $a.Repo -Tag $a.Tag -Amd64Only
 }
 
 function Cmd-PushImagesArm64 {
+    $a = Get-ImageArgs
     Write-Host "[>]  Building arm64-only images and pushing..." -ForegroundColor Cyan
-    & "$PSScriptRoot\scripts\push-images.ps1" -Arm64Only
+    & "$PSScriptRoot\scripts\push-images.ps1" -Registry $a.Registry -Repo $a.Repo -Tag $a.Tag -Arm64Only
 }
 
 function Cmd-UpPrebuilt {

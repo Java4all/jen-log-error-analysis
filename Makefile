@@ -2,6 +2,13 @@
 # Jenkins Performance Analyzer -- Makefile (Linux / macOS)
 # -----------------------------------------------------------------------------
 
+# Load .env into make variables and export them to all child processes.
+# The leading dash means: don't fail if .env doesn't exist yet.
+# Shell-level overrides (IMAGE_REGISTRY=x make push-images) take precedence
+# because make variables set on the command line always win over file includes.
+-include .env
+export
+
 COMPOSE      = docker compose
 COMPOSE_OLLAMA = docker compose --profile ollama
 COMPOSE_GPU  = docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile gpu

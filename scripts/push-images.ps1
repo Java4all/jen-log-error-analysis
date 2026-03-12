@@ -29,22 +29,30 @@ $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 
 # ---------------------------------------------------------------------------
-# Load .env (without overriding vars already set in the shell)
+# Resolve Registry / Repo / Tag:
+#   1. Use -Registry / -Repo / -Tag params if provided (passed by make.ps1)
+#   2. Fall back to environment variables
+#   3. Fall back to .env file values
+#   4. Use built-in defaults
 # ---------------------------------------------------------------------------
-if (Test-Path ".env") {
-  Get-Content ".env" | ForEach-Object {
-    if ($_ -match "^\s*([^#=][^=]*)=(.*)$") {
-      $k = $Matches[1].Trim(); $v = $Matches[2].Trim()
-      if (-not [System.Environment]::GetEnvironmentVariable($k, "Process")) {
-        [System.Environment]::SetEnvironmentVariable($k, $v, "Process")
+function Read-DotEnv {
+  $map = @{}
+  if (Test-Path ".env") {
+    Get-Content ".env" | ForEach-Object {
+      if ($_ -match "^\s*([^#=][^=]*)=(.*)$") {
+        $map[$Matches[1].Trim()] = $Matches[2].Trim().Trim('"').Trim("'")
       }
     }
   }
+  return $map
 }
+$dotenv = Read-DotEnv
 
-if (-not $Registry) { $Registry = if ($env:IMAGE_REGISTRY) { $env:IMAGE_REGISTRY } else { "" } }
-if (-not $Repo)     { $Repo     = if ($env:IMAGE_REPO)     { $env:IMAGE_REPO }     else { "jenkins-analyzer" } }
-if (-not $Tag)      { $Tag      = if ($env:IMAGE_TAG)      { $env:IMAGE_TAG }      else { "latest" } }
+if (-not $Registry) { $Registry = if ($env:IMAGE_REGISTRY) { $env:IMAGE_REGISTRY } elseif ($dotenv["IMAGE_REGISTRY"]) { $dotenv["IMAGE_REGISTRY"] } else { "" } }
+if (-not $Repo)     { $Repo     = if ($env:IMAGE_REPO)     { $env:IMAGE_REPO }     elseif ($dotenv["IMAGE_REPO"])     { $dotenv["IMAGE_REPO"] }     else { "jenkins-analyzer" } }
+if (-not $Tag)      { $Tag      = if ($env:IMAGE_TAG)      { $env:IMAGE_TAG }      elseif ($dotenv["IMAGE_TAG"])      { $dotenv["IMAGE_TAG"] }      else { "latest" } }
+
+Write-Host "  [debug] Registry='$Registry'  Repo='$Repo'  Tag='$Tag'" -ForegroundColor DarkGray
 
 $BuilderName = "jenkins-analyzer-builder"
 $Platforms   = if ($Amd64Only) { "linux/amd64" } elseif ($Arm64Only) { "linux/arm64" } else { "linux/amd64,linux/arm64" }
