@@ -1,0 +1,113 @@
+# Jenkins Performance Analyzer -- Configuration
+# -----------------------------------------------------------------------------
+
+# -- AI Backend ---------------------------------------------------------------
+ai:
+  # Options: "anthropic" | "ollama" | "private"
+  provider: "ollama"
+
+  # GPU acceleration (used when provider is "ollama" or "private")
+  gpu_enabled: true
+  gpu_layers: 35          # number of layers to offload to GPU (llama.cpp)
+
+  anthropic:
+    api_key: ""           # or set env: ANTHROPIC_API_KEY
+    model: "claude-sonnet-4-20250514"
+    max_tokens: 2000
+
+  # Ollama (local model, e.g. codellama, mistral, llama3)
+  ollama:
+    base_url: "http://localhost:11434"
+    model: "codellama:13b"
+    timeout: 120
+
+  # Private / enterprise OpenAI-compatible endpoint
+  private:
+    base_url: "http://localhost:8080/v1"   # e.g. llama.cpp server, vLLM, LM Studio
+    api_key: ""                             # leave empty if not required
+    model: "codellama-13b-instruct"
+    timeout: 120
+    verify_ssl: true
+
+# -- GitHub Integration --------------------------------------------------------
+github:
+  # Options: "public" | "private"
+  type: "private"
+  token: ""               # or set env: GITHUB_TOKEN (required for private)
+  timeout: 30
+
+  # Source repos for code-correlation analysis
+  # Each repo's source files will be parsed to extract method signatures
+  repos:
+    - url: "https://github.com/your-org/jenkins-shared-libs"
+      branch: "main"
+      paths:
+        - "vars/"
+        - "src/"
+      extensions: [".groovy", ".java"]
+      enabled: false
+
+    - url: "https://github.com/your-org/service-abc"
+      branch: "develop"
+      paths:
+        - "src/"
+      extensions: [".groovy", ".java", ".py", ".js"]
+      enabled: false
+
+# -- Pipeline Tag Configuration ------------------------------------------------
+pipeline:
+  # The static service/pipeline prefix used in log lines
+  # e.g. "service-abc: method_name" -> static_tag = "service-abc"
+  # Can be overridden per-request from the UI
+  static_tags:
+    - "service-abc"
+    - "service-deploy"
+    - "service-test"
+
+  # Regex pattern for method start detection (uses {tag} placeholder)
+  # Default: matches "<tag>: <method_name>"
+  method_start_pattern: "{tag}:\\s*([\\w_]+)"
+
+  # Regex for timing lines
+  timing_pattern: "^([\\w_]+):time-elapsed-seconds:([\\d.]+)"
+
+  # Stage detection regex
+  stage_pattern: "StageName:\\s*(.+)"
+
+  # Timestamp regex (ISO 8601)
+  timestamp_pattern: "\\[(\\d{4}-\\d{2}-\\d{2}T[\\d:.]+z?)\\]"
+
+# -- Analysis Settings ---------------------------------------------------------
+analysis:
+  # Max log size to send to AI (chars) -- prevents token overflow
+  max_log_chars_for_ai: 4000
+  # Max source code chars to include in AI context
+  max_source_chars_for_ai: 3000
+  # Include call tree depth in AI context
+  include_call_tree: true
+  # Highlight methods slower than this percentile
+  slow_method_percentile: 80
+
+# -- Network / Private-only mode -----------------------------------------------
+network:
+  # When true, the backend refuses calls to public cloud services:
+  #   Blocked:  Anthropic API (api.anthropic.com)
+  #             Public GitHub (github.com)
+  #
+  #   Allowed:  GitHub Enterprise / on-prem  (github.type: private + custom URL)
+  #             Private AI endpoints          (provider: ollama or private)
+  #             Jenkins server (on-prem)
+  #             Future: on-prem AI fine-tuning service
+  #
+  # Activate via this flag or env var: PRIVATE_ONLY_MODE=true
+  # Legacy env var ISOLATED_MODE=true also works.
+  private_only_mode: true
+
+  # Batch processing for large logs (10k+ lines)
+  # auto:   batch when log exceeds batch_threshold_lines (recommended)
+  # always: always batch -- best for local models with small context windows
+  # never:  single-shot only
+  batch_mode: "auto"
+  batch_threshold_lines: 500
+  batch_max_stages: 3
+  batch_max_log_chars: 3000

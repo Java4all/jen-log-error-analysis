@@ -1,0 +1,34 @@
+# -----------------------------------------------------------------------------
+# GPU override -- apply on top of docker-compose.yml for NVIDIA GPU mode.
+#
+# Adds the NVIDIA device reservation to the ollama service and sets the API
+# to use ollama as the default AI provider.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile gpu up --build
+#
+# Shortcut (Linux/macOS):  make up-gpu
+# Shortcut (Windows):      .\make.ps1 up-gpu
+# -----------------------------------------------------------------------------
+
+name: jenkins-analyzer
+
+services:
+
+  api:
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - AI_PROVIDER=${AI_PROVIDER:-ollama}
+
+  ollama:
+    environment:
+      - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-2}
+      - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS:-1}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]

@@ -1,0 +1,32 @@
+# -----------------------------------------------------------------------------
+# Private-only overlay -- apply on top of docker-compose.yml
+#
+# Sets PRIVATE_ONLY_MODE=true which tells the backend to refuse calls to
+# public cloud services (Anthropic API, public github.com).
+#
+# Private / on-prem resources are still fully reachable:
+#   - GitHub Enterprise  (e.g. https://github.mycompany.com)
+#   - Jenkins server     (on-prem)
+#   - Private AI models  (ollama, vLLM, LM Studio, etc.)
+#   - Any private endpoint configured in config.yaml
+#
+# NOTE: Docker network isolation is intentionally NOT used here. Setting
+# internal: true would also block private network resources (GitHub Enterprise,
+# Jenkins, etc.). App-layer enforcement in main.py is sufficient and more
+# precise -- it blocks by service type, not by IP range.
+#
+# Usage:
+#   CPU:  docker compose -f docker-compose.yml -f docker-compose.isolated.yml --profile ollama up --build
+#   GPU:  docker compose -f docker-compose.yml -f docker-compose.gpu.yml -f docker-compose.isolated.yml --profile gpu up --build
+#
+# Shortcuts (Linux/macOS):  make up-ollama-isolated  /  make up-gpu-isolated
+# Shortcuts (Windows):      .\make.ps1 up-ollama-isolated  /  up-gpu-isolated
+# -----------------------------------------------------------------------------
+
+name: jenkins-analyzer
+
+services:
+  api:
+    environment:
+      - PRIVATE_ONLY_MODE=true
+      - AI_PROVIDER=${AI_PROVIDER:-ollama}

@@ -1,0 +1,143 @@
+# -----------------------------------------------------------------------------
+# Jenkins Performance Analyzer -- Docker Compose
+#
+# Profiles:
+#   (none / default)  ->  API + Frontend only. Use Anthropic or private AI.
+#   ollama            ->  adds Ollama on CPU. Works on Mac, Linux, Windows.
+#   gpu               ->  adds Ollama on CPU (GPU device added by gpu override).
+#
+# Usage:
+#   Cloud AI only:           docker compose up --build
+#   Local Ollama, CPU/Mac:   docker compose --profile ollama up --build
+#   Local Ollama, NVIDIA:    docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile gpu up --build
+# -----------------------------------------------------------------------------
+
+name: jenkins-analyzer
+
+services:
+
+  # -- Python FastAPI backend --------------------------------------------------
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: jenkins-analyzer-api:latest
+    container_name: jenkins-analyzer-api
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - ./config:/app/config:ro
+      - config_data:/app/config_rw
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - AI_PROVIDER=${AI_PROVIDER:-anthropic}
+    networks:
+      - analyzer-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # -- React frontend (nginx) --------------------------------------------------
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_API_URL: ""
+    image: jenkins-analyzer-frontend:latest
+    container_name: jenkins-analyzer-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/app.conf:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - analyzer-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # -- Ollama local model ------------------------------------------------------
+  # Included in both the "ollama" (CPU) and "gpu" profiles.
+  # No deploy block here -- docker-compose.gpu.yml adds the NVIDIA device
+  # reservation when running in GPU mode.
+  ollama:
+    profiles: ["ollama", "gpu"]
+    image: ollama/ollama:latest
+    container_name: jenkins-analyzer-ollama
+    restart: unless-stopped
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    environment:
+      - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-1}
+      - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS:-1}
+    networks:
+      - analyzer-net
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # -- Model initializer (pulls model on first run) ----------------------------
+  ollama-init:
+    profiles: ["ollama", "gpu"]
+    image: curlimages/curl:latest
+    container_name: jenkins-analyzer-ollama-init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - analyzer-net
+    restart: "no"
+    entrypoint:
+      - sh
+      - -c
+      - |
+        MODEL="${OLLAMA_MODEL:-codellama:13b}"
+        echo "Pulling model: $$MODEL"
+        curl -sf -X POST http://ollama:11434/api/pull \
+          -H "Content-Type: application/json" \
+          -d "{\"name\": \"$$MODEL\", \"stream\": false}"
+        echo "Model pull complete."
+    environment:
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-codellama:13b}
+
+networks:
+  analyzer-net:
+    driver: bridge
+
+volumes:
+  ollama_models:
+    driver: local
+  config_data:
+    driver: local

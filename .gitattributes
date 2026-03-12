@@ -1,0 +1,33 @@
+# -----------------------------------------------------------------------------
+# .gitattributes -- Line-ending normalisation
+# Ensures shell scripts always have LF endings (required for Linux containers)
+# and Windows scripts have CRLF on checkout.
+# -----------------------------------------------------------------------------
+
+# Default: normalise everything to LF in the repo
+* text=auto
+
+# -- Force LF for files that run INSIDE Linux containers ----------------------
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.conf          text eol=lf
+*.py            text eol=lf
+*.jsx           text eol=lf
+*.js            text eol=lf
+*.json          text eol=lf
+*.md            text eol=lf
+*.txt           text eol=lf
+Makefile        text eol=lf
+
+# -- Force CRLF for Windows-native scripts (optional -- they work either way) --
+*.ps1           text eol=crlf
+*.bat           text eol=crlf
+*.cmd           text eol=crlf
+
+# -- Binary -- no line-ending conversion ---------------------------------------
+*.png           binary
+*.jpg           binary
+*.ico           binary
+*.woff2         binary
