@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import yaml
+import httpx
 from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -148,7 +149,13 @@ class HealthResponse(BaseModel):
 
 def build_parser(override_tags: Optional[list[str]] = None) -> JenkinsLogParser:
     cfg = get_config()
-    tags = override_tags or cfg.pipeline.static_tags
+    # Use override only when it's a non-empty list; empty list means "use config"
+    if override_tags is not None and len(override_tags) > 0:
+        # Strip whitespace from each tag in case of sloppy input
+        tags = [t.strip() for t in override_tags if t.strip()]
+    else:
+        tags = cfg.pipeline.static_tags
+    logger.info(f"Parser tags: {tags} (override={override_tags!r})")
     return JenkinsLogParser(
         static_tags=tags,
         method_start_pattern=cfg.pipeline.method_start_pattern,
@@ -225,6 +232,41 @@ async def health():
         batch_mode=cfg.analysis.batch_mode,
         batch_threshold_lines=cfg.analysis.batch_threshold_lines,
     )
+
+
+@app.get("/api/ollama/health")
+async def ollama_health():
+    """Check whether Ollama is reachable and the configured model is available."""
+    cfg = get_config()
+    if cfg.ai.provider != "ollama":
+        return {"status": "not_configured", "provider": cfg.ai.provider}
+    base_url = cfg.ai.ollama.base_url
+    model = cfg.ai.ollama.model
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(f"{base_url.rstrip('/')}/api/tags")
+            resp.raise_for_status()
+            tags = resp.json()
+            available = [m["name"] for m in tags.get("models", [])]
+            model_ready = any(m == model or m.startswith(model.split(":")[0]) for m in available)
+            return {
+                "status": "ok" if model_ready else "model_missing",
+                "base_url": base_url,
+                "model": model,
+                "model_ready": model_ready,
+                "available_models": available,
+                "fix": None if model_ready else f"docker exec jenkins-analyzer-ollama ollama pull {model}",
+            }
+    except httpx.ConnectError:
+        return {
+            "status": "unreachable",
+            "base_url": base_url,
+            "model": model,
+            "model_ready": False,
+            "fix": "Ollama container not running or OLLAMA_BASE_URL wrong. Check: docker ps | grep ollama",
+        }
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
 
 
 @app.post("/api/parse")

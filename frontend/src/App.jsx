@@ -14,16 +14,26 @@ const COLORS = ["#58a6ff","#3fb950","#f0b429","#ff7b72","#d2a8ff","#56d364","#79
 const SLOW_COLOR = "#ff7b72";
 
 // -- API helpers ---------------------------------------------------------------
-async function apiFetch(path, options = {}) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || res.statusText);
+async function apiFetch(path, options = {}, timeoutMs = 300_000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      ...options,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail || res.statusText);
+    }
+    return res.json();
+  } catch (e) {
+    if (e.name === "AbortError") throw new Error(`Request timed out after ${timeoutMs/1000}s. The AI model may need more time -- try a smaller model or increase timeout.`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
   }
-  return res.json();
 }
 
 // -- Fallback client-side parser (when backend unavailable) -----------------
@@ -544,7 +554,10 @@ export default function App() {
   const [fileUrl, setFileUrl] = useState("");
   const [parsed, setParsed] = useState(null);
   const [activeTab, setActiveTab] = useState("input");
+  const batchRunningRef = useRef(false);   // true while batch SSE is streaming
+  const userNavigatedRef = useRef(false);  // true if user clicked a tab during batch
   const [loading, setLoading] = useState(false);
+  const [aiStatusMsg, setAiStatusMsg] = useState("");
   const [aiLoading, setAiLoading] = useState(false);
   const [chartType, setChartType] = useState("total");
   const [customTags, setCustomTags] = useState("");   // per-request tag override
@@ -584,12 +597,14 @@ export default function App() {
   const analyzeBatch = async (text) => {
     const tags = customTags.trim() ? customTags.split(",").map(s=>s.trim()).filter(Boolean) : null;
     const body = JSON.stringify({ log_text: text, pipeline_tags: tags, include_source: true });
+    batchRunningRef.current = true;
+    userNavigatedRef.current = false;
 
     try {
       // First do a synchronous parse to get structured data
       const parseResult = await apiFetch("/api/parse", { method:"POST", body });
       setParsed({ ...parseResult, ai_report:"", source_methods_matched:0 });
-      setActiveTab("analysis");
+      setActiveTab("parse");
 
       // Then stream the batch AI analysis
       const resp = await fetch(`${API_BASE}/api/analyze/batch`, {
@@ -621,11 +636,30 @@ export default function App() {
               setBatchProgress({ batch:0, total:evt.total_batches, label:"Starting...", reports:[], logLines:evt.log_lines });
             } else if (evt.type === "progress") {
               setBatchProgress(p => ({ ...p, batch:evt.batch, total:evt.total, label:evt.label }));
-              setActiveTab("ai");
+              // Don't auto-switch tabs during streaming -- user may be reading Analysis
             } else if (evt.type === "batch_done") {
               setBatchProgress(p => ({ ...p, reports:[...(p?.reports||[]), evt.partial_report] }));
             } else if (evt.type === "synthesis") {
               setBatchProgress(p => ({ ...p, label:evt.message, synthesising:true }));
+            } else if (evt.type === "done") {
+              setParsed(p => ({ ...p, ai_report:evt.final_report, source_methods_matched:evt.source_matched }));
+              setBatchProgress(p => ({ ...p, done:true, label:"Complete" }));
+              // Only auto-switch to report when fully done, and only if user hasn't moved
+              if (!userNavigatedRef.current) setActiveTab("report");
+            } else if (evt.type === "error") {
+              setParsed(p => ({ ...p, ai_report:`**Batch error:** ${evt.message}` }));
+              setBatchProgress(p => ({ ...p, error:true, label:evt.message }));
+            }
+          } catch {}
+        }
+      }
+    } catch (e) {
+      setParsed(p => p ? { ...p, ai_report:`**Error:** ${e.message}` } : null);
+    } finally {
+      batchRunningRef.current = false;
+      setLoading(false);
+      setAiLoading(false);
+    }
             } else if (evt.type === "done") {
               setParsed(p => ({ ...p, ai_report:evt.final_report, source_methods_matched:evt.source_matched }));
               setBatchProgress(p => ({ ...p, done:true, label:"Complete" }));
@@ -648,6 +682,7 @@ export default function App() {
     setLoading(true);
     setAiLoading(true);
     setBatchProgress(null);
+    setAiStatusMsg("Parsing log...");
 
     if (backendStatus && isBatchMode(text)) {
       await analyzeBatch(text);
@@ -658,20 +693,23 @@ export default function App() {
       const tags = customTags.trim() ? customTags.split(",").map(s=>s.trim()).filter(Boolean) : null;
 
       if (backendStatus) {
-        // Full backend analysis (parse + source correlation + AI)
+        setAiStatusMsg("Analysing with AI — this may take 30-120s with a local model...");
         const result = await apiFetch("/api/analyze", {
           method: "POST",
           body: JSON.stringify({ log_text: text, pipeline_tags: tags, include_source: true }),
-        });
+        }, 300_000);
         setParsed(result);
+        setAiStatusMsg("");
       } else {
         // Client-side fallback
         const result = parseLogLocal(text, tags || ["service-abc","service-test","service-deploy"]);
         result.ai_report = "[!] Backend not available -- running client-side parse only. Start the Python API for AI analysis.";
         setParsed(result);
+        setAiStatusMsg("");
       }
       setActiveTab("parse");
     } catch(e) {
+      setAiStatusMsg("");
       alert("Analysis error: " + e.message);
     }
     setLoading(false);
@@ -777,12 +815,26 @@ export default function App() {
         </div>
       )}
 
+      {/* Batch progress banner -- visible on all tabs while streaming */}
+      {batchProgress && !batchProgress.done && !batchProgress.error && (
+        <div style={{ background:"#161b22", borderBottom:"1px solid #21262d", padding:"6px 28px", display:"flex", alignItems:"center", gap:12 }}>
+          <div style={{ flex:1, height:4, borderRadius:2, background:"#21262d", overflow:"hidden" }}>
+            <div style={{ height:"100%", borderRadius:2, background:"#58a6ff", transition:"width 0.4s",
+              width: batchProgress.total ? `${Math.round((batchProgress.batch/batchProgress.total)*100)}%` : "10%" }} />
+          </div>
+          <span style={{ fontSize:11, color:"#8b949e", whiteSpace:"nowrap" }}>
+            {batchProgress.synthesising ? "⚙ Synthesising final report..." :
+             `⚙ AI batch ${batchProgress.batch}/${batchProgress.total} — ${batchProgress.label || "processing"}`}
+          </span>
+        </div>
+      )}
+
       {/* Tabs */}
       <div style={{ display:"flex", borderBottom:"1px solid #21262d", background:"#161b22", padding:"0 28px" }}>
         {tabs.map(t => {
           const accentColor = t.failedBadge ? "#ff7b72" : t.errorBadge ? "#d29922" : "#58a6ff";
           return (
-            <button key={t.id} disabled={t.disabled} onClick={() => !t.disabled && setActiveTab(t.id)} style={{
+            <button key={t.id} disabled={t.disabled} onClick={() => { if (!t.disabled) { if (batchRunningRef.current) userNavigatedRef.current = true; setActiveTab(t.id); } }} style={{
               background:"none", border:"none", padding:"12px 18px",
               color: activeTab===t.id ? accentColor : t.disabled ? "#484f58" : "#8b949e",
               borderBottom: activeTab===t.id ? `2px solid ${accentColor}` : "2px solid transparent",
@@ -807,6 +859,15 @@ export default function App() {
               <input value={customTags} onChange={e=>setCustomTags(e.target.value)}
                 placeholder="service-abc, service-deploy, service-test  (leave empty to use config defaults)"
                 style={{ width:"100%", background:"#0d1117", border:"1px solid #21262d", borderRadius:6, padding:"7px 12px", color:"#79c0ff", fontFamily:"inherit", fontSize:12, boxSizing:"border-box" }} />
+              {customTags.trim() ? (
+                <div style={{ marginTop:5, fontSize:11, color:"#3fb950" }}>
+                  ✓ Will use: {customTags.split(",").map(s=>s.trim()).filter(Boolean).map(t=>`"${t}"`).join(", ")}
+                </div>
+              ) : (
+                <div style={{ marginTop:5, fontSize:11, color:"#8b949e" }}>
+                  Using tags from config.yaml
+                </div>
+              )}
             </div>
 
             <div style={{ background:"#161b22", border:"1px solid #30363d", borderRadius:8, padding:14 }}>
@@ -831,6 +892,11 @@ export default function App() {
                 style={{ width:"100%", minHeight:280, background:"#0d1117", border:"1px solid #21262d", borderRadius:6, padding:12, color:"#79c0ff", fontFamily:"inherit", fontSize:12, lineHeight:1.6, resize:"vertical", boxSizing:"border-box" }} />
               <div style={{ display:"flex", gap:8, marginTop:10 }}>
                 <Btn onClick={() => analyze(logText)} loading={loading} disabled={!logText.trim()}>[!] Analyze</Btn>
+                {loading && aiStatusMsg && (
+                  <span style={{fontSize:"0.78rem", color:"#8b949e", marginLeft:8, fontStyle:"italic"}}>
+                    ⏳ {aiStatusMsg}
+                  </span>
+                )}
                 <Btn onClick={() => setLogText("")} variant="ghost">Clear</Btn>
                 <span style={{ marginLeft:"auto", fontSize:11, color:"#484f58", alignSelf:"center" }}>
                   {logText.split("\n").length} lines * {(logText.length/1024).toFixed(1)} KB

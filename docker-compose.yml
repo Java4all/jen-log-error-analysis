@@ -48,10 +48,12 @@ services:
       # -- Network / isolation --
       - PRIVATE_ONLY_MODE=${PRIVATE_ONLY_MODE:-false}
       - ISOLATED_MODE=${ISOLATED_MODE:-false}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # allows connecting to native Ollama on Mac/Linux host
     networks:
       - analyzer-net
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "--noproxy", "localhost", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -82,7 +84,7 @@ services:
     networks:
       - analyzer-net
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost/health"]
+      test: ["CMD", "sh", "-c", "no_proxy=localhost wget -qO- http://localhost/health"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -107,12 +109,13 @@ services:
     volumes:
       - ollama_models:/root/.ollama
     environment:
+      - OLLAMA_HOST=0.0.0.0          # bind to all interfaces so other containers can connect
       - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-1}
       - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS:-1}
     networks:
       - analyzer-net
     healthcheck:
-      test: ["CMD", "ollama", "list"]
+      test: ["CMD", "sh", "-c", "OLLAMA_HOST=localhost:11434 ollama list"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -123,29 +126,6 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # -- Model initializer (pulls model on first run) ----------------------------
-  ollama-init:
-    profiles: ["ollama", "gpu"]
-    image: curlimages/curl:latest
-    container_name: jenkins-analyzer-ollama-init
-    depends_on:
-      ollama:
-        condition: service_healthy
-    networks:
-      - analyzer-net
-    restart: "no"
-    entrypoint:
-      - sh
-      - -c
-      - |
-        MODEL="${OLLAMA_MODEL:-codellama:13b}"
-        echo "Pulling model: $$MODEL"
-        curl -sf -X POST http://ollama:11434/api/pull \
-          -H "Content-Type: application/json" \
-          -d "{\"name\": \"$$MODEL\", \"stream\": false}"
-        echo "Model pull complete."
-    environment:
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-codellama:13b}
 
 networks:
   analyzer-net:

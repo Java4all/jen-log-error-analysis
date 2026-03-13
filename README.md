@@ -147,6 +147,54 @@ Windows Host
 | >= 8 GB  | codellama:7b / mistral:7b  | `OLLAMA_MODEL=codellama:7b` |
 | < 8 GB  | phi3:mini / codellama:7b-q4 | `OLLAMA_MODEL=phi3:mini` |
 
+### Pulling the Ollama model
+
+The model is **not pulled automatically** — you must pull it manually after the
+stack is running. This gives you full control over which model is loaded and
+avoids unexpected downloads on restricted networks.
+
+**Step 1** — set the model in `.env`:
+```bash
+OLLAMA_MODEL=codellama:13b   # or codellama:7b, mistral:7b, phi3:mini, llama3:8b
+```
+
+**Step 2** — start the stack:
+```bash
+make up-ollama          # Linux / macOS
+.\make.ps1 up-ollama   # Windows
+```
+
+**Step 3** — pull the model (choose one method):
+
+```bash
+# Method A: via make (reads OLLAMA_MODEL from .env automatically)
+make pull-model
+.\make.ps1 pull-model
+
+# Method B: directly into the running container
+docker exec jenkins-analyzer-ollama ollama pull codellama:13b
+
+# Method C: interactive shell inside the container
+docker exec -it jenkins-analyzer-ollama ollama pull codellama:13b
+```
+
+**Verify the model is loaded:**
+```bash
+docker exec jenkins-analyzer-ollama ollama list
+```
+
+**Swap to a different model** — update `.env` and re-pull:
+```bash
+# .env
+OLLAMA_MODEL=phi3:mini
+
+make pull-model
+# or
+docker exec jenkins-analyzer-ollama ollama pull phi3:mini
+```
+
+The API picks up the new model automatically on the next request (no restart needed).
+
 ### Verify GPU works in Docker
 
 ```powershell

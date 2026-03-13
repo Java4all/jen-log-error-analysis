@@ -276,7 +276,7 @@ function Cmd-UpGpu {
         Write-Cyan  "  Frontend  -> http://localhost:$fp"
         Write-Cyan  "  API docs  -> http://localhost:$ap/docs"
         Write-Cyan  "  Ollama    -> http://localhost:$op"
-        Write-Host  "  Model: $model (being pulled by ollama-init)"
+        Write-Host  "  Model: $model  (run: .\make.ps1 pull-model  to pull it)"
         Write-Host ""
     }
 }

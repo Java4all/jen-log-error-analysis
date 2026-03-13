@@ -77,6 +77,199 @@ class ErrorEvent:
     exit_code: Optional[int] = None
 
 
+
+
+# -- Standard Jenkins pattern auto-detection -----------------------------------
+# Cover real-world Jenkins/Pipeline/Maven/Gradle log formats so the tool works
+# out-of-the-box without requiring custom pattern configuration.
+
+# [Pipeline] { (Build)
+_PIPELINE_STAGE_RE = re.compile(r"\[Pipeline\]\s+\{\s+\((.+?)\)")
+# Maven plugin phase: [INFO] --- maven-surefire-plugin:2.22.2:test ...
+_MAVEN_PHASE_RE = re.compile(r"\[INFO\]\s+---\s+[\w.\-]+:([\w\-]+)\s+")
+# Time elapsed: 1.234 s
+_MAVEN_ELAPSED_RE = re.compile(r"Time elapsed:\s*([\d.]+)\s*s", re.IGNORECASE)
+# [INFO] Total time:  01:23 min  OR  5.678 s
+_MAVEN_TOTAL_RE = re.compile(r"\[INFO\]\s+Total time:\s+(?:(\d+):(\d+)\s+min|([\d.]+)\s*s)")
+# > Task :compileJava
+_GRADLE_TASK_RE = re.compile(r"^>\s+Task\s+:([\w:]+)")
+# BUILD SUCCESSFUL in 1m 23s
+_GRADLE_TOTAL_RE = re.compile(r"BUILD (?:SUCCESSFUL|FAILED) in (?:(\d+)m\s+)?(\d+)s")
+# Finished Stage 'X' in 1.2s
+_FINISHED_STAGE_RE = re.compile(
+    r"Finished\s+(?:Stage\s+)?['\"]?(.+?)['\"]?\s+in\s+([\d.]+)\s*s", re.IGNORECASE
+)
+# [stage:Build] or stage('Build')
+_STAGE_LABEL_RE = re.compile(r"(?:\[stage:([^\]]+)\]|stage\(['\"]([^'\"]+)['\"]\))")
+
+
+def _detect_log_format(lines: list[str], static_tags: list[str] | None = None) -> str:
+    """Sniff the log to determine format.
+
+    Custom format is detected when:
+      - any configured static tag appears as '<tag>: <method>' anywhere in a line
+        (handles timestamp/log-level prefixes: '[2024-01-15T10:00:30z] service-abc: method_1')
+      - or 'time-elapsed-seconds' / 'StageName:' appears anywhere in the log.
+    Full log is scanned (not just first 200 lines) since builds can have long preambles.
+    """
+    tag_res = [re.compile(rf"{re.escape(t)}:\s+\w") for t in (static_tags or [])]
+
+    for line in lines:
+        stripped = line.strip()
+        if "time-elapsed-seconds" in stripped or "StageName:" in stripped:
+            return "custom"
+        for pat in tag_res:
+            if pat.search(stripped):
+                return "custom"
+
+    # Fall back to standard format detection on first 200 lines
+    sample = lines[:200]
+    pipeline_hits = sum(1 for l in sample if "[Pipeline]" in l)
+    maven_hits    = sum(1 for l in sample if "[INFO]" in l or "[ERROR]" in l)
+    gradle_hits   = sum(1 for l in sample if l.strip().startswith("> Task") or "BUILD SUCCESSFUL" in l)
+    if pipeline_hits >= 3:
+        return "pipeline"
+    if maven_hits >= 5:
+        return "maven"
+    if gradle_hits >= 2:
+        return "gradle"
+    return "unknown"
+
+
+def _parse_standard(lines: list[str], fmt: str, slow_percentile: int) -> tuple:
+    """
+    Parse standard Jenkins/Maven/Gradle logs.
+    Returns (stages, method_timings, method_tags, detected_format_label, warnings)
+    """
+    stages: list = []
+    method_timings: dict = {}
+    method_tags: dict = {}
+    warnings: list[str] = []
+    current_stage_name: Optional[str] = None
+    current_stage_start = 0
+    current_stage_time = 0.0
+    pending_phase: Optional[str] = None  # Maven: open phase name waiting for timing
+
+    for i, line in enumerate(lines):
+        trimmed = line.strip()
+        if not trimmed:
+            continue
+
+        # --- Stage detection ---
+        stage_name = None
+        if fmt == "pipeline":
+            m = _PIPELINE_STAGE_RE.search(line)
+            if m:
+                stage_name = m.group(1).strip()
+        elif fmt in ("maven", "gradle", "unknown"):
+            m = _STAGE_LABEL_RE.search(line)
+            if m:
+                stage_name = (m.group(1) or m.group(2) or "").strip()
+            fs = _FINISHED_STAGE_RE.search(line)
+            if fs:
+                # Treat as a completed stage with timing
+                sname = fs.group(1).strip()
+                elapsed = float(fs.group(2))
+                method_timings.setdefault(sname, []).append(elapsed)
+                method_tags.setdefault(sname, set()).add("stage")
+                if not stages or stages[-1].name != sname:
+                    stages.append(Stage(name=sname, start_line=i, end_line=i,
+                                        methods=[{"name": sname, "elapsed": elapsed, "service_tag": "stage"}],
+                                        total_time=elapsed))
+                continue
+
+        if stage_name:
+            if current_stage_name:
+                stages.append(Stage(
+                    name=current_stage_name, start_line=current_stage_start,
+                    end_line=i - 1, total_time=current_stage_time, methods=[],
+                ))
+            current_stage_name = stage_name
+            current_stage_start = i
+            current_stage_time = 0.0
+            pending_phase = None
+            continue
+
+        # --- Timing detection ---
+        elapsed = None
+        method_name = None
+
+        if fmt == "maven":
+            pm = _MAVEN_PHASE_RE.search(line)
+            if pm:
+                pending_phase = pm.group(1)
+
+            em = _MAVEN_ELAPSED_RE.search(line)
+            if em:
+                elapsed = float(em.group(1))
+                method_name = pending_phase or current_stage_name or "test"
+                pending_phase = None
+
+            tm = _MAVEN_TOTAL_RE.search(line)
+            if tm:
+                if tm.group(1) and tm.group(2):
+                    elapsed = int(tm.group(1)) * 60 + int(tm.group(2))
+                else:
+                    elapsed = float(tm.group(3))
+                method_name = "total-build"
+
+        elif fmt in ("gradle", "unknown"):
+            gt = _GRADLE_TOTAL_RE.search(line)
+            if gt:
+                mins = int(gt.group(1)) if gt.group(1) else 0
+                secs = int(gt.group(2))
+                elapsed = mins * 60 + secs
+                method_name = "total-build"
+
+            tk = _GRADLE_TASK_RE.match(trimmed)
+            if tk:
+                # Track task as a method with unknown elapsed; pair with next timing if any
+                pending_phase = tk.group(1).replace(":", "_")
+
+            em = _MAVEN_ELAPSED_RE.search(line)
+            if em:
+                elapsed = float(em.group(1))
+                method_name = pending_phase or current_stage_name or "task"
+                pending_phase = None
+
+        elif fmt == "pipeline":
+            em = _MAVEN_ELAPSED_RE.search(line)
+            if em:
+                elapsed = float(em.group(1))
+                method_name = pending_phase or current_stage_name or "step"
+            gt = _GRADLE_TOTAL_RE.search(line)
+            if gt:
+                mins = int(gt.group(1)) if gt.group(1) else 0
+                elapsed = mins * 60 + int(gt.group(2))
+                method_name = "total-build"
+
+        if elapsed is not None and method_name:
+            method_timings.setdefault(method_name, []).append(elapsed)
+            method_tags.setdefault(method_name, set()).add(fmt)
+            current_stage_time += elapsed
+
+    if current_stage_name:
+        stages.append(Stage(
+            name=current_stage_name, start_line=current_stage_start,
+            end_line=len(lines) - 1, total_time=current_stage_time, methods=[],
+        ))
+
+    if not method_timings:
+        warnings.append(
+            f"No timing data found in {fmt} format log. "
+            "For Maven logs ensure surefire outputs 'Time elapsed:' lines. "
+            "For Gradle use '--profile'. "
+            "For custom logs set timing_pattern in config."
+        )
+    if not stages:
+        warnings.append(
+            f"No pipeline stages detected in {fmt} format log. "
+            "For Declarative Pipeline ensure stage('Name') blocks are present."
+        )
+
+    return stages, method_timings, method_tags, fmt, warnings
+
+
 # -- Parser --------------------------------------------------------------------
 
 
@@ -85,7 +278,7 @@ class JenkinsLogParser:
         self,
         static_tags: list[str],
         method_start_pattern: str = r"{tag}:\s*([\w_]+)",
-        timing_pattern: str = r"^([\w_]+):time-elapsed-seconds:([\d.]+)",
+        timing_pattern: str = r"([\w_]+)\s*\(?\)?:time-elapsed-seconds:([\d.]+)",
         stage_pattern: str = r"StageName:\s*(.+)",
         timestamp_pattern: str = r"\[(\d{4}-\d{2}-\d{2}T[\d:.]+z?)\]",
         slow_percentile: int = 80,
@@ -111,6 +304,24 @@ class JenkinsLogParser:
 
     def parse(self, raw_log: str) -> ParseResult:
         lines = raw_log.split("\n")
+
+        # Auto-detect format; fall through to custom parser if patterns are configured
+        fmt = _detect_log_format(lines, self.static_tags)
+        if fmt != "custom":
+            std_stages, std_timings, std_tags, fmt_label, std_warnings = \
+                _parse_standard(lines, fmt, self.slow_percentile)
+            # Only return standard results if timings were found.
+            # If stages exist but no timings, fall through to the custom parser --
+            # the log likely has [Pipeline] markers AND custom service-tag markers.
+            if std_timings:
+                return self._build_result(
+                    lines, std_stages, std_timings, std_tags, [], set(),
+                    std_warnings + ([f"Auto-detected log format: {fmt_label}"] if fmt_label != "unknown" else []),
+                )
+            extra_warn = []
+        else:
+            extra_warn = []
+
         stages: list[Stage] = []
         method_timings: dict[str, list[float]] = {}
         method_tags: dict[str, set[str]] = {}
@@ -118,7 +329,7 @@ class JenkinsLogParser:
         stack: list[MethodCall] = []
         current_stage: Optional[Stage] = None
         detected_tags: set[str] = set()
-        warnings: list[str] = []
+        warnings: list[str] = extra_warn
         global_duration = 0.0
 
         for line_idx, line in enumerate(lines):
@@ -131,6 +342,8 @@ class JenkinsLogParser:
             ts = ts_match.group(1) if ts_match else None
 
             # -- Stage detection ----------------------------------------------
+            # Use search() not match() so patterns find their target anywhere
+            # in the line -- timestamps, log prefixes etc. are ignored naturally.
             stage_m = self.stage_re.search(trimmed)
             if stage_m:
                 if current_stage:
@@ -147,7 +360,7 @@ class JenkinsLogParser:
                 continue
 
             # -- Timing line --------------------------------------------------
-            timing_m = self.timing_re.match(trimmed)
+            timing_m = self.timing_re.search(trimmed)
             if timing_m:
                 method_name = timing_m.group(1)
                 elapsed = float(timing_m.group(2))
@@ -184,7 +397,7 @@ class JenkinsLogParser:
 
             # Auto-detect unknown tags (generic pattern)
             if matched_method is None:
-                gm = self._generic_method_re.match(trimmed)
+                gm = self._generic_method_re.search(trimmed)
                 if gm:
                     auto_tag = gm.group(1)
                     auto_method = gm.group(2)
@@ -228,7 +441,52 @@ class JenkinsLogParser:
             current_stage.end_line = len(lines) - 1
             stages.append(current_stage)
 
-        # -- Build timing stats -----------------------------------------------
+        if not method_timings:
+            # Scan log for any lines that look like '<word>: <method>' to suggest real tags
+            candidate_re = re.compile(r"(?:^|[\]\s])([a-zA-Z][\w-]{2,}[\w]):\s+[\w_]+\s*$")
+            seen_candidates: set[str] = set()
+            for raw_line in lines[:500]:
+                cm = candidate_re.search(raw_line.strip())
+                if cm:
+                    cand = cm.group(1)
+                    if cand.lower() not in {"info", "warn", "error", "debug", "trace",
+                                            "stage", "method", "step", "pipeline"}:
+                        seen_candidates.add(cand)
+            hint = (
+                f" Possible tag names seen in log: {sorted(seen_candidates)}."
+                f" Update static_tags in config.yaml to match."
+                if seen_candidates else ""
+            )
+            warnings.append(
+                f"No timing markers found. "
+                f"Searched for configured tags: {self.static_tags}.{hint} "
+                "Expected start: '[timestamp] <tag>: method_name' and "
+                "end: 'method_name():time-elapsed-seconds:1.23'."
+            )
+        if not stages:
+            warnings.append("No stages detected.")
+        if detected_tags - set(self.static_tags):
+            auto = detected_tags - set(self.static_tags)
+            warnings.append(f"Auto-detected pipeline tags not in config: {', '.join(sorted(auto))}")
+
+        return self._build_result(
+            lines, stages, method_timings, method_tags, call_tree, detected_tags, warnings,
+            global_duration=global_duration,
+        )
+
+    # -- Shared result builder -------------------------------------------------
+
+    def _build_result(
+        self,
+        lines: list[str],
+        stages: list,
+        method_timings: dict,
+        method_tags: dict,
+        call_tree: list,
+        detected_tags: set,
+        warnings: list[str],
+        global_duration: float = 0.0,
+    ) -> "ParseResult":
         all_totals = [sum(v) for v in method_timings.values()]
         slow_threshold = (
             float(sorted(all_totals)[int(len(all_totals) * self.slow_percentile / 100)])
@@ -240,7 +498,7 @@ class JenkinsLogParser:
             total = sum(values)
             avg = statistics.mean(values)
             p95 = sorted(values)[int(len(values) * 0.95)] if len(values) > 1 else values[0]
-            stat = TimingStat(
+            timing_stats.append(TimingStat(
                 name=name,
                 service_tags=list(method_tags.get(name, set())),
                 total=round(total, 3),
@@ -251,21 +509,9 @@ class JenkinsLogParser:
                 p95=round(p95, 3),
                 all_values=values,
                 is_slow=total >= slow_threshold,
-            )
-            timing_stats.append(stat)
-
+            ))
         timing_stats.sort(key=lambda s: s.total, reverse=True)
 
-        # Warnings
-        if not timing_stats:
-            warnings.append("No timing markers found. Ensure logs contain '<method>:time-elapsed-seconds:<n>' lines.")
-        if not stages:
-            warnings.append("No stages detected. Ensure logs contain 'StageName: <name>' markers.")
-        if detected_tags - set(self.static_tags):
-            auto = detected_tags - set(self.static_tags)
-            warnings.append(f"Auto-detected pipeline tags not in config: {', '.join(sorted(auto))}")
-
-        # -- Error detection pass ------------------------------------------------
         errors, failed_methods, build_failed = self._detect_errors(lines, stages)
 
         return ParseResult(

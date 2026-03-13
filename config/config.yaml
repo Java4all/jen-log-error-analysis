@@ -64,17 +64,24 @@ pipeline:
     - "service-deploy"
     - "service-test"
 
-  # Regex pattern for method start detection (uses {tag} placeholder)
-  # Default: matches "<tag>: <method_name>"
+  # Regex pattern for method start detection (uses {tag} placeholder).
+  # All patterns use re.search() so they match anywhere in the line --
+  # timestamps, log prefixes, and other noise are ignored automatically.
+  # These all match the same method:
+  #   service-abc: method_1
+  #   [2024-01-15T10:00:15.123z]  service-abc: method_1
+  #   INFO [2024-01-15T10:00:15z] service-abc: method_1
   method_start_pattern: "{tag}:\\s*([\\w_]+)"
 
-  # Regex for timing lines
-  timing_pattern: "^([\\w_]+):time-elapsed-seconds:([\\d.]+)"
+  # Timing line pattern -- no ^ anchor needed, search() finds it anywhere
+  timing_pattern: "([\\w_]+)\\s*\\(?\\)?:time-elapsed-seconds:([\\d.]+)"
 
   # Stage detection regex
   stage_pattern: "StageName:\\s*(.+)"
 
-  # Timestamp regex (ISO 8601)
+  # Timestamp extraction regex -- only used to extract the timestamp value
+  # for display purposes, not for gating pattern matching.
+  # Supports: [2024-01-15T10:00:15z]  [2024-01-15T10:00:15.123z]  etc.
   timestamp_pattern: "\\[(\\d{4}-\\d{2}-\\d{2}T[\\d:.]+z?)\\]"
 
 # -- Analysis Settings ---------------------------------------------------------

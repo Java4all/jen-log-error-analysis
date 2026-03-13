@@ -110,54 +110,125 @@ class OllamaProvider(BaseAIProvider):
         return opts
 
     async def complete(self, system: str, user: str) -> str:
-        async with httpx.AsyncClient(
-            base_url=self.cfg.base_url, timeout=self.cfg.timeout
-        ) as client:
-            resp = await client.post(
-                "/api/chat",
-                json={
-                    "model": self.cfg.model,
-                    "stream": False,
-                    "options": self._options(),
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                },
+        try:
+            async with httpx.AsyncClient(
+                base_url=self.cfg.base_url, timeout=self.cfg.timeout
+            ) as client:
+                resp = await client.post(
+                    "/api/chat",
+                    json={
+                        "model": self.cfg.model,
+                        "stream": False,
+                        "options": self._options(),
+                        "messages": [
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": user},
+                        ],
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                return data["message"]["content"]
+        except httpx.ConnectError:
+            raise AIServiceError(
+                f"Cannot connect to Ollama at {self.cfg.base_url}. "
+                f"Is the Ollama container running? "
+                f"Run: docker exec jenkins-analyzer-ollama ollama pull {self.cfg.model}"
             )
-            resp.raise_for_status()
-            data = resp.json()
-            return data["message"]["content"]
+        except httpx.TimeoutException:
+            raise AIServiceError(
+                f"Ollama request timed out after {self.cfg.timeout}s. "
+                f"The model may still be loading -- try again in a moment."
+            )
+        except httpx.HTTPStatusError as e:
+            _body = e.response.text[:400]
+            _status = e.response.status_code
+            # Try to extract Ollama's own error field
+            try:
+                _detail = e.response.json().get("error", _body)
+            except Exception:
+                _detail = _body
+            if _status == 404:
+                raise AIServiceError(
+                    f"Ollama model '{self.cfg.model}' not found. "
+                    f"Pull it: docker exec jenkins-analyzer-ollama ollama pull {self.cfg.model}"
+                )
+            if _status == 500:
+                if "model" in _detail.lower() and ("not found" in _detail.lower() or "unknown" in _detail.lower()):
+                    raise AIServiceError(
+                        f"Ollama model '{self.cfg.model}' not loaded. "
+                        f"Pull it: docker exec jenkins-analyzer-ollama ollama pull {self.cfg.model}"
+                    )
+                raise AIServiceError(
+                    f"Ollama internal error (500): {_detail}. "
+                    f"Check logs: docker logs jenkins-analyzer-ollama"
+                )
+            raise AIServiceError(f"Ollama HTTP {_status}: {_detail}")
 
     async def stream(self, system: str, user: str) -> AsyncIterator[str]:
-        async with httpx.AsyncClient(
-            base_url=self.cfg.base_url, timeout=self.cfg.timeout
-        ) as client:
-            async with client.stream(
-                "POST",
-                "/api/chat",
-                json={
-                    "model": self.cfg.model,
-                    "stream": True,
-                    "options": self._options(),
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                },
-            ) as resp:
-                resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    if line:
-                        try:
-                            evt = json.loads(line)
-                            chunk = evt.get("message", {}).get("content", "")
-                            if chunk:
-                                yield chunk
-                            if evt.get("done"):
-                                break
-                        except json.JSONDecodeError:
-                            pass
+        try:
+            async with httpx.AsyncClient(
+                base_url=self.cfg.base_url, timeout=self.cfg.timeout
+            ) as client:
+                async with client.stream(
+                    "POST",
+                    "/api/chat",
+                    json={
+                        "model": self.cfg.model,
+                        "stream": True,
+                        "options": self._options(),
+                        "messages": [
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": user},
+                        ],
+                    },
+                ) as resp:
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        if line:
+                            try:
+                                evt = json.loads(line)
+                                chunk = evt.get("message", {}).get("content", "")
+                                if chunk:
+                                    yield chunk
+                                if evt.get("done"):
+                                    break
+                            except json.JSONDecodeError:
+                                pass
+        except httpx.ConnectError:
+            raise AIServiceError(
+                f"Cannot connect to Ollama at {self.cfg.base_url}. "
+                f"Is the Ollama container running? "
+                f"Run: docker exec jenkins-analyzer-ollama ollama pull {self.cfg.model}"
+            )
+        except httpx.TimeoutException:
+            raise AIServiceError(
+                f"Ollama request timed out after {self.cfg.timeout}s. "
+                f"The model may still be loading -- try again in a moment."
+            )
+        except httpx.HTTPStatusError as e:
+            _body = e.response.text[:400]
+            _status = e.response.status_code
+            try:
+                _detail = e.response.json().get("error", _body)
+            except Exception:
+                _detail = _body
+            if _status == 404:
+                raise AIServiceError(
+                    f"Ollama model '{self.cfg.model}' not found. "
+                    f"Pull it: docker exec jenkins-analyzer-ollama ollama pull {self.cfg.model}"
+                )
+            if _status == 500:
+                if "model" in _detail.lower() and ("not found" in _detail.lower() or "unknown" in _detail.lower()):
+                    raise AIServiceError(
+                        f"Ollama model '{self.cfg.model}' not loaded. "
+                        f"Pull it: docker exec jenkins-analyzer-ollama ollama pull {self.cfg.model}"
+                    )
+                raise AIServiceError(
+                    f"Ollama internal error (500): {_detail}. "
+                    f"Check logs: docker logs jenkins-analyzer-ollama"
+                )
+            raise AIServiceError(f"Ollama HTTP {_status}: {_detail}")
 
 
 # -- Private / OpenAI-compatible -----------------------------------------------
