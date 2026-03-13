@@ -660,22 +660,6 @@ export default function App() {
       setLoading(false);
       setAiLoading(false);
     }
-            } else if (evt.type === "done") {
-              setParsed(p => ({ ...p, ai_report:evt.final_report, source_methods_matched:evt.source_matched }));
-              setBatchProgress(p => ({ ...p, done:true, label:"Complete" }));
-            } else if (evt.type === "error") {
-              setParsed(p => ({ ...p, ai_report:`**Batch error:** ${evt.message}` }));
-              setBatchProgress(p => ({ ...p, error:true, label:evt.message }));
-            }
-          } catch {}
-        }
-      }
-    } catch (e) {
-      setParsed(p => p ? { ...p, ai_report:`**Error:** ${e.message}` } : null);
-    } finally {
-      setLoading(false);
-      setAiLoading(false);
-    }
   };
 
   const analyze = async (text) => {
