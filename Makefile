@@ -14,12 +14,17 @@ COMPOSE_OLLAMA = docker compose --profile ollama
 COMPOSE_GPU  = docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile gpu
 COMPOSE_ISOLATED_OLLAMA = docker compose -f docker-compose.yml -f docker-compose.isolated.yml --profile ollama
 COMPOSE_ISOLATED_GPU    = docker compose -f docker-compose.yml -f docker-compose.gpu.yml -f docker-compose.isolated.yml --profile gpu
+# Host-native Ollama (Ollama runs on Mac/Linux host, not in Docker)
+COMPOSE_HOST_OLLAMA          = docker compose -f docker-compose.yml -f docker-compose.host-ollama.yml
+COMPOSE_PREBUILT_HOST_OLLAMA = docker compose -f docker-compose.yml -f docker-compose.prebuilt.yml -f docker-compose.host-ollama.yml
 
 .PHONY: help setup up up-ollama up-gpu down down-ollama down-gpu \
         up-ollama-isolated up-gpu-isolated down-isolated \
+        up-host-ollama down-host-ollama \
         buildx-setup push-images push-images-amd64 push-images-arm64 push-images-tag \
         up-prebuilt up-prebuilt-ollama up-prebuilt-gpu \
         up-prebuilt-isolated up-prebuilt-gpu-isolated \
+        up-prebuilt-host-ollama \
         build logs logs-api logs-frontend logs-ollama restart shell-api ps health \
         pull-model clean nuke
 
@@ -42,6 +47,12 @@ help:
 	@echo "  Local Ollama, CPU mode (Mac, Linux, Windows without NVIDIA):"
 	@echo "  make up-ollama       build + start API + frontend + Ollama on CPU"
 	@echo "  make down-ollama     stop"
+	@echo ""
+	@echo "  Host-native Ollama (Ollama installed on your Mac/Linux, not in Docker):"
+	@echo "  make up-host-ollama          build + start API + frontend, use host Ollama"
+	@echo "  make up-prebuilt-host-ollama pull pre-built images + use host Ollama"
+	@echo "  make down-host-ollama        stop"
+	@echo "  Requires: OLLAMA_HOST=0.0.0.0 ollama serve  (on your Mac)"
 	@echo ""
 	@echo "  Local Ollama, GPU mode (Linux / Windows with NVIDIA GPU):"
 	@echo "  make up-gpu          build + start API + frontend + Ollama on GPU"
@@ -94,6 +105,34 @@ up-ollama: setup
 
 down-ollama:
 	$(COMPOSE_OLLAMA) down
+
+# -- Host-native Ollama (Ollama on Mac/Linux host, no Ollama container) -------
+up-host-ollama: setup
+	@echo "[>]  Starting stack with host-native Ollama..."
+	@echo "     Make sure Ollama is running on your host:"
+	@echo "       OLLAMA_HOST=0.0.0.0 ollama serve"
+	@echo ""
+	@# Verify host Ollama is reachable before starting
+	@if curl -sf --max-time 3 http://localhost:$$(grep OLLAMA_PORT .env 2>/dev/null | cut -d= -f2 || echo 11434)/api/tags > /dev/null 2>&1; then \
+		echo "[OK]  Host Ollama is reachable"; \
+	else \
+		echo "[!]  WARNING: Host Ollama not responding on port $$(grep OLLAMA_PORT .env 2>/dev/null | cut -d= -f2 || echo 11434)"; \
+		echo "     Start it with: OLLAMA_HOST=0.0.0.0 ollama serve"; \
+		echo "     Continuing anyway -- you can configure the URL in the app's Config tab."; \
+	fi
+	@grep -q "^AI_PROVIDER=" .env 2>/dev/null && \
+		sed -i.bak 's/^AI_PROVIDER=.*/AI_PROVIDER=ollama/' .env || \
+		echo "AI_PROVIDER=ollama" >> .env
+	$(COMPOSE_HOST_OLLAMA) up --build -d
+	@echo ""
+	@echo "[OK]  Stack running (using host Ollama):"
+	@echo "    Frontend  -> http://localhost:$$(grep FRONTEND_PORT .env 2>/dev/null | cut -d= -f2 || echo 3000)"
+	@echo "    API docs  -> http://localhost:$$(grep API_PORT .env 2>/dev/null | cut -d= -f2 || echo 8000)/docs"
+	@echo "    Ollama    -> http://host.docker.internal:$$(grep OLLAMA_PORT .env 2>/dev/null | cut -d= -f2 || echo 11434) (host)"
+	@echo "    Model     -> $$(grep OLLAMA_MODEL .env 2>/dev/null | cut -d= -f2 || echo codellama:13b)"
+
+down-host-ollama:
+	$(COMPOSE_HOST_OLLAMA) down
 
 # -- Local Ollama, GPU mode --------------------------------------------------
 up-gpu: setup
@@ -215,6 +254,16 @@ up-prebuilt-gpu-isolated: ## Pre-built + private-only mode (Ollama GPU, public c
 	@echo "[>]  Starting pre-built private-only stack (Ollama GPU)..."
 	@$(COMPOSE_PREBUILT_GPU_ISO) up -d
 	@echo "[OK] Pre-built private-only GPU stack running"
+
+up-prebuilt-host-ollama: ## Pull pre-built images + use host-native Ollama (no Ollama container)
+	@echo "[>]  Starting pre-built stack with host-native Ollama..."
+	@if curl -sf --max-time 3 http://localhost:$$(grep OLLAMA_PORT .env 2>/dev/null | cut -d= -f2 || echo 11434)/api/tags > /dev/null 2>&1; then \
+		echo "[OK]  Host Ollama is reachable"; \
+	else \
+		echo "[!]  WARNING: Host Ollama not responding -- start it with: OLLAMA_HOST=0.0.0.0 ollama serve"; \
+	fi
+	@$(COMPOSE_PREBUILT_HOST_OLLAMA) up -d
+	@echo "[OK] Stack running on http://localhost:$${FRONTEND_PORT:-3000} (host Ollama)"
 
 .PHONY: buildx-setup push-images push-images-amd64 push-images-arm64 push-images-tag up-prebuilt up-prebuilt-ollama up-prebuilt-gpu up-prebuilt-isolated up-prebuilt-gpu-isolated
 

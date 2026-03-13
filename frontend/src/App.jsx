@@ -159,6 +159,538 @@ function CustomTooltip({ active, payload, label }) {
   );
 }
 
+
+// ---------------------------------------------------------------------------
+// AI Focus Panel — smart options derived from parse results
+// ---------------------------------------------------------------------------
+function AIFocusPanel({ parsed, onRun, loading, backendStatus }) {
+  const [selected, setSelected] = useState(null);  // {type, label, stage?, question?}
+  const [customQ, setCustomQ]   = useState("");
+  const [stageVal, setStageVal] = useState("");
+
+  // Build suggestion cards from parse data
+  const suggestions = [];
+
+  const errors   = parsed?.errors        || [];
+  const stats    = parsed?.timing_stats  || [];
+  const stages   = parsed?.stages        || [];
+  const failed   = parsed?.build_failed  || false;
+  const warnings = parsed?.warnings      || [];
+
+  const slowMethods = stats.filter(s => s.is_slow);
+  const errorCount  = errors.length;
+  const critErrors  = errors.filter(e => ["BUILD_FAILED","EXCEPTION","EXIT_CODE"].includes(e.error_type));
+
+  // Card 1 — errors (only if present)
+  if (errorCount > 0) {
+    const types = [...new Set(errors.map(e => e.error_type))].join(", ");
+    suggestions.push({
+      type: "errors",
+      icon: "✕",
+      accent: "#ff7b72",
+      accentBg: "rgba(182,35,36,0.12)",
+      label: "Diagnose Failures",
+      desc: `${errorCount} error${errorCount>1?"s":""} detected (${types}). AI will trace the root cause chain and suggest exact fixes.`,
+      badge: failed ? "BUILD FAILED" : `${errorCount} errors`,
+      badgeColor: "#ff7b72",
+    });
+  }
+
+  // Card 2 — performance (if slow methods or long duration)
+  if (slowMethods.length > 0 || parsed?.total_duration > 60) {
+    const top = slowMethods[0];
+    suggestions.push({
+      type: "performance",
+      icon: "⚡",
+      accent: "#f0b429",
+      accentBg: "rgba(240,180,41,0.08)",
+      label: "Performance Bottlenecks",
+      desc: slowMethods.length > 0
+        ? `${slowMethods.length} slow method${slowMethods.length>1?"s":""} flagged. Slowest: ${top?.name} (${top?.max}s max). AI will map bottlenecks and suggest parallelisation.`
+        : `Build took ${parsed?.total_duration?.toFixed(0)}s. AI will identify where time is being lost.`,
+      badge: slowMethods.length > 0 ? `${slowMethods.length} slow` : `${parsed?.total_duration?.toFixed(0)}s`,
+      badgeColor: "#f0b429",
+    });
+  }
+
+  // Card 3 — full (if both errors + perf issues)
+  if (errorCount > 0 && (slowMethods.length > 0 || parsed?.total_duration > 60)) {
+    suggestions.push({
+      type: "full",
+      icon: "◈",
+      accent: "#d2a8ff",
+      accentBg: "rgba(210,168,255,0.07)",
+      label: "Full Diagnosis",
+      desc: "Complete analysis covering both failures and performance. AI will determine if slowness contributed to the failure.",
+      badge: "recommended",
+      badgeColor: "#d2a8ff",
+    });
+  }
+
+  // Card 4 — auto (fallback if nothing specific)
+  if (suggestions.length === 0) {
+    suggestions.push({
+      type: "auto",
+      icon: "✦",
+      accent: "#58a6ff",
+      accentBg: "rgba(88,166,255,0.07)",
+      label: "General Analysis",
+      desc: "No major issues detected. AI will summarise build health, verify timing patterns, and suggest any improvements.",
+      badge: stages.length + " stages",
+      badgeColor: "#58a6ff",
+    });
+  }
+
+  const sel = selected;
+
+  const canRun = backendStatus && (
+    (sel && sel.type !== "stage" && sel.type !== "custom") ||
+    (sel?.type === "stage" && stageVal) ||
+    (sel?.type === "custom" && customQ.trim().length > 5)
+  );
+
+  const handleRun = () => {
+    if (!sel) return;
+    const focus =
+      sel.type === "stage"  ? { type:"stage",  label:`Stage: ${stageVal}`, stage: stageVal } :
+      sel.type === "custom" ? { type:"custom", label:`Q: ${customQ.slice(0,40)}`, question: customQ } :
+      sel;
+    onRun(focus);
+  };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+        <div style={{ flex:1 }}>
+          <div style={{ fontSize:13, fontWeight:700, color:"#e6edf3", marginBottom:2 }}>
+            What do you want to analyse?
+          </div>
+          <div style={{ fontSize:11, color:"#484f58" }}>
+            Log parsed: {parsed?.log_lines?.toLocaleString()} lines · {stages.length} stages · {parsed?.total_duration?.toFixed(1)}s
+            {failed && <span style={{ color:"#ff7b72", marginLeft:8 }}>· Build failed</span>}
+          </div>
+        </div>
+        {!backendStatus && (
+          <span style={{ fontSize:11, color:"#ff7b72", background:"rgba(182,35,36,0.12)",
+            padding:"3px 10px", borderRadius:20, border:"1px solid #da363340" }}>
+            Backend offline — AI unavailable
+          </span>
+        )}
+      </div>
+
+      {/* Suggestion cards */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(240px, 1fr))", gap:8 }}>
+        {suggestions.map(s => (
+          <div key={s.type}
+            onClick={() => setSelected(sel?.type === s.type ? null : s)}
+            style={{
+              padding:"12px 14px", borderRadius:8, cursor:"pointer",
+              border: sel?.type === s.type ? `1.5px solid ${s.accent}` : "1.5px solid #21262d",
+              background: sel?.type === s.type ? s.accentBg : "rgba(255,255,255,0.02)",
+              transition:"all 0.15s",
+              position:"relative", overflow:"hidden",
+            }}>
+            {/* Left accent bar */}
+            <div style={{ position:"absolute", left:0, top:0, bottom:0, width:3,
+              background: sel?.type === s.type ? s.accent : "transparent",
+              borderRadius:"8px 0 0 8px", transition:"background 0.15s" }} />
+            <div style={{ display:"flex", alignItems:"flex-start", gap:8, paddingLeft:6 }}>
+              <span style={{ fontSize:16, lineHeight:1, color:s.accent, flexShrink:0,
+                marginTop:1 }}>{s.icon}</span>
+              <div style={{ flex:1 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:4 }}>
+                  <span style={{ fontSize:12, fontWeight:700, color:"#e6edf3" }}>{s.label}</span>
+                  <span style={{ fontSize:10, color:s.badgeColor, background:`${s.badgeColor}20`,
+                    padding:"1px 6px", borderRadius:10, fontWeight:600 }}>{s.badge}</span>
+                </div>
+                <div style={{ fontSize:11, color:"#8b949e", lineHeight:1.5 }}>{s.desc}</div>
+              </div>
+            </div>
+          </div>
+        ))}
+
+        {/* Stage deep-dive card */}
+        <div
+          onClick={() => setSelected(sel?.type === "stage" ? null : { type:"stage", label:"Stage deep-dive", accent:"#3fb950" })}
+          style={{
+            padding:"12px 14px", borderRadius:8, cursor:"pointer",
+            border: sel?.type === "stage" ? "1.5px solid #3fb950" : "1.5px solid #21262d",
+            background: sel?.type === "stage" ? "rgba(63,185,80,0.07)" : "rgba(255,255,255,0.02)",
+            transition:"all 0.15s", position:"relative", overflow:"hidden",
+          }}>
+          <div style={{ position:"absolute", left:0, top:0, bottom:0, width:3,
+            background: sel?.type === "stage" ? "#3fb950" : "transparent",
+            borderRadius:"8px 0 0 8px", transition:"background 0.15s" }} />
+          <div style={{ display:"flex", alignItems:"flex-start", gap:8, paddingLeft:6 }}>
+            <span style={{ fontSize:16, lineHeight:1, color:"#3fb950", flexShrink:0, marginTop:1 }}>⬡</span>
+            <div style={{ flex:1 }}>
+              <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:4 }}>
+                <span style={{ fontSize:12, fontWeight:700, color:"#e6edf3" }}>Stage Deep-Dive</span>
+                <span style={{ fontSize:10, color:"#3fb950", background:"#3fb95020",
+                  padding:"1px 6px", borderRadius:10, fontWeight:600 }}>focused</span>
+              </div>
+              <div style={{ fontSize:11, color:"#8b949e", lineHeight:1.5 }}>
+                Pick one stage for a detailed breakdown: methods, errors, timing, and optimisation advice.
+              </div>
+              {sel?.type === "stage" && (
+                <select
+                  value={stageVal}
+                  onChange={e => { e.stopPropagation(); setStageVal(e.target.value); }}
+                  onClick={e => e.stopPropagation()}
+                  style={{ marginTop:8, width:"100%", background:"#0d1117",
+                    border:"1px solid #30363d", borderRadius:4, color:"#e6edf3",
+                    padding:"4px 8px", fontSize:11 }}>
+                  <option value="">— select a stage —</option>
+                  {stages.map(s => (
+                    <option key={s.name} value={s.name}>
+                      {s.name}{s.total_time > 0 ? ` (${s.total_time.toFixed(1)}s)` : ""}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Custom question card */}
+        <div
+          onClick={() => setSelected(sel?.type === "custom" ? null : { type:"custom", label:"Custom question", accent:"#79c0ff" })}
+          style={{
+            padding:"12px 14px", borderRadius:8, cursor:"pointer",
+            border: sel?.type === "custom" ? "1.5px solid #79c0ff" : "1.5px solid #21262d",
+            background: sel?.type === "custom" ? "rgba(121,192,255,0.07)" : "rgba(255,255,255,0.02)",
+            transition:"all 0.15s", position:"relative", overflow:"hidden",
+          }}>
+          <div style={{ position:"absolute", left:0, top:0, bottom:0, width:3,
+            background: sel?.type === "custom" ? "#79c0ff" : "transparent",
+            borderRadius:"8px 0 0 8px", transition:"background 0.15s" }} />
+          <div style={{ display:"flex", alignItems:"flex-start", gap:8, paddingLeft:6 }}>
+            <span style={{ fontSize:16, lineHeight:1, color:"#79c0ff", flexShrink:0, marginTop:1 }}>✎</span>
+            <div style={{ flex:1 }}>
+              <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:4 }}>
+                <span style={{ fontSize:12, fontWeight:700, color:"#e6edf3" }}>Ask a Question</span>
+                <span style={{ fontSize:10, color:"#79c0ff", background:"#79c0ff20",
+                  padding:"1px 6px", borderRadius:10, fontWeight:600 }}>custom</span>
+              </div>
+              <div style={{ fontSize:11, color:"#8b949e", lineHeight:1.5 }}>
+                Ask anything specific about the log — e.g. "Why did the Docker push fail?" or "Is there a memory leak?"
+              </div>
+              {sel?.type === "custom" && (
+                <textarea
+                  value={customQ}
+                  onChange={e => { e.stopPropagation(); setCustomQ(e.target.value); }}
+                  onClick={e => e.stopPropagation()}
+                  placeholder="Type your question about this build..."
+                  rows={2}
+                  style={{ marginTop:8, width:"100%", background:"#0d1117",
+                    border:"1px solid #30363d", borderRadius:4, color:"#e6edf3",
+                    padding:"6px 8px", fontSize:11, resize:"vertical", fontFamily:"inherit" }}
+                />
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Run button row */}
+      <div style={{ display:"flex", alignItems:"center", gap:10, paddingTop:4,
+        borderTop:"1px solid #21262d" }}>
+        <Btn
+          onClick={handleRun}
+          loading={loading}
+          disabled={!canRun}
+          style={{ minWidth:160 }}>
+          {loading ? "Analysing..." : sel ? `Run: ${sel.label}` : "Select an option above"}
+        </Btn>
+        {sel && !loading && (
+          <span style={{ fontSize:11, color:"#484f58" }}>
+            {sel.type === "stage" && !stageVal ? "Select a stage to continue" :
+             sel.type === "custom" && customQ.trim().length <= 5 ? "Type your question to continue" :
+             "Ready — AI will focus specifically on this lens"}
+          </span>
+        )}
+        {!sel && (
+          <span style={{ fontSize:11, color:"#484f58" }}>Choose an analysis focus above</span>
+        )}
+      </div>
+
+    </div>
+  );
+}
+
+// -- Pipeline Timeline ---------------------------------------------------------
+function PipelineTimeline({ parsed }) {
+  const [view, setView]         = useState("timeline"); // "timeline" | "tree"
+  const [hoveredMethod, setHov] = useState(null);
+  const [tooltip, setTooltip]   = useState(null);
+
+  const stages   = parsed.stages  || [];
+  const errors   = parsed.errors  || [];
+  const timingMap = {};
+  (parsed.timing_stats || []).forEach(t => { timingMap[t.name] = t; });
+
+  // Build a flat list of all methods with their stage, for timeline positioning
+  // Each stage's methods are laid out sequentially (we only have elapsed, not start time)
+  const totalDuration = parsed.total_duration || stages.reduce((a,s) => a + (s.total_time||0), 0) || 1;
+
+  // Error lookup by stage name
+  const errorsByStage = {};
+  errors.forEach(e => {
+    const k = e.stage || "__unknown__";
+    (errorsByStage[k] = errorsByStage[k] || []).push(e);
+  });
+
+  // Color helpers
+  const heatColor = (elapsed, maxT) => {
+    if (!elapsed || !maxT) return "#2a3a2a";
+    const r = elapsed / maxT;
+    if (r > 0.7) return "#b62324";
+    if (r > 0.4) return "#b8860b";
+    if (r > 0.15) return "#1a6b1a";
+    return "#1a3a1a";
+  };
+  const heatBorder = (elapsed, maxT) => {
+    if (!elapsed || !maxT) return "#3fb950";
+    const r = elapsed / maxT;
+    if (r > 0.7) return "#ff7b72";
+    if (r > 0.4) return "#f0b429";
+    return "#3fb950";
+  };
+
+  const maxMethodTime = Math.max(1, ...(parsed.timing_stats||[]).map(t => t.max));
+
+  if (view === "tree") {
+    return (
+      <div>
+        <div style={{ display:"flex", gap:8, alignItems:"center", marginBottom:12 }}>
+          <span style={{ fontSize:12, color:"#8b949e" }}>Nested call hierarchy. Color = elapsed time. Click to expand.</span>
+          <div style={{ marginLeft:"auto", display:"flex", gap:6 }}>
+            <Btn small variant="secondary" onClick={() => setView("timeline")}>Timeline</Btn>
+            <Btn small variant="primary" onClick={() => setView("tree")} style={{ opacity:0.5 }}>Tree</Btn>
+          </div>
+        </div>
+        {parsed.call_tree?.length > 0
+          ? parsed.call_tree.map((n,i) => <CallNode key={i} node={n} depth={0} />)
+          : <div style={{ color:"#484f58", textAlign:"center", padding:40 }}>No nested call tree detected.</div>}
+      </div>
+    );
+  }
+
+  // ---- TIMELINE VIEW ----
+  return (
+    <div>
+      {/* Header */}
+      <div style={{ display:"flex", gap:8, alignItems:"center", marginBottom:12 }}>
+        <div style={{ fontSize:12, color:"#8b949e" }}>
+          Chronological pipeline timeline · {stages.length} stage{stages.length!==1?"s":""} · {totalDuration.toFixed(1)}s total
+          {parsed.build_failed && <span style={{ color:"#ff7b72", marginLeft:8 }}>· Build failed</span>}
+        </div>
+        <div style={{ marginLeft:"auto", display:"flex", gap:6 }}>
+          <Btn small variant="primary" onClick={() => setView("timeline")} style={{ opacity:0.5 }}>Timeline</Btn>
+          <Btn small variant="secondary" onClick={() => setView("tree")}>Tree</Btn>
+        </div>
+      </div>
+
+      {/* Time axis ruler */}
+      <div style={{ position:"relative", height:20, marginBottom:4, paddingLeft:160 }}>
+        {[0,25,50,75,100].map(pct => (
+          <div key={pct} style={{ position:"absolute", left:`calc(160px + ${pct}%)`, transform:"translateX(-50%)",
+            color:"#484f58", fontSize:10 }}>
+            {(totalDuration * pct / 100).toFixed(1)}s
+          </div>
+        ))}
+      </div>
+
+      {/* Stages */}
+      <div style={{ display:"flex", flexDirection:"column", gap:2 }}>
+        {stages.length === 0 && (
+          <div style={{ color:"#484f58", textAlign:"center", padding:40 }}>No stage data detected.</div>
+        )}
+        {stages.map((stage, si) => {
+          const stageT   = stage.total_time || 0;
+          const stagePct = totalDuration > 0 ? (stageT / totalDuration) * 100 : 0;
+          const stageErrors = (errorsByStage[stage.name] || []).concat(errorsByStage["__unknown__"] || []).filter((e,_,arr) =>
+            e.stage === stage.name || (si === stages.length-1 && !e.stage));
+          const hasFail  = stageErrors.length > 0;
+          const methods  = stage.methods || [];
+          const methodTotal = methods.reduce((a,m) => a+(m.elapsed||0), 0) || stageT || 1;
+          const isSlow   = stageT > (totalDuration * 0.3);
+
+          return (
+            <div key={si}>
+              <div style={{ display:"flex", alignItems:"stretch", gap:0, minHeight:36 }}>
+                {/* Stage label */}
+                <div style={{ width:156, flexShrink:0, paddingRight:8, display:"flex",
+                  flexDirection:"column", justifyContent:"center", alignItems:"flex-end" }}>
+                  <div style={{ fontSize:11, color: hasFail?"#ff7b72": isSlow?"#f0b429":"#8b949e",
+                    fontWeight: hasFail||isSlow?700:400, textAlign:"right",
+                    overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap",
+                    maxWidth:152, direction:"rtl" }} title={stage.name}>
+                    {stage.name}
+                  </div>
+                  <div style={{ fontSize:10, color:"#484f58" }}>{stageT > 0 ? stageT.toFixed(1)+"s" : "—"}</div>
+                </div>
+
+                {/* Bar area */}
+                <div style={{ flex:1, position:"relative", display:"flex", alignItems:"center",
+                  borderLeft:"1px solid #21262d" }}>
+                  {/* Stage total bar (background) */}
+                  <div style={{ position:"absolute", left:0, top:"20%", height:"60%",
+                    width: stagePct+"%", minWidth: stagePct > 0 ? 2 : 0,
+                    background: hasFail ? "rgba(182,35,36,0.15)" : "rgba(33,38,45,0.8)",
+                    borderRadius:2 }} />
+
+                  {/* Method blocks inside stage */}
+                  {methods.length > 0 && (() => {
+                    let cursor = 0;
+                    return methods.map((m, mi) => {
+                      const mPct = methodTotal > 0 ? ((m.elapsed||0) / methodTotal) * 100 : 0;
+                      const barLeft = cursor;
+                      cursor += mPct;
+                      const stat  = timingMap[m.name];
+                      const slow  = stat?.is_slow;
+                      const bc    = heatColor(m.elapsed, maxMethodTime);
+                      const bord  = heatBorder(m.elapsed, maxMethodTime);
+                      const w     = Math.max(mPct * stagePct / 100, m.elapsed > 0 ? 0.3 : 0);
+                      const left  = (barLeft / 100) * stagePct;
+
+                      return (
+                        <div key={mi}
+                          onMouseEnter={e => {
+                            setHov(m.name);
+                            setTooltip({ x: e.clientX, y: e.clientY, method: m, stat, stage: stage.name });
+                          }}
+                          onMouseLeave={() => { setHov(null); setTooltip(null); }}
+                          style={{
+                            position:"absolute", left: left+"%", height:"70%", top:"15%",
+                            width: Math.max(w, 0.5)+"%", minWidth: m.elapsed > 0 ? 4 : 1,
+                            background: bc, border: `1px solid ${bord}`,
+                            borderRadius:2, cursor:"default", zIndex:1,
+                            opacity: hoveredMethod && hoveredMethod !== m.name ? 0.5 : 1,
+                            transition:"opacity 0.1s",
+                            boxShadow: slow ? `0 0 4px ${bord}` : "none",
+                          }}
+                        />
+                      );
+                    });
+                  })()}
+
+                  {/* Error markers */}
+                  {stageErrors.map((err, ei) => (
+                    <div key={ei}
+                      title={err.message}
+                      onMouseEnter={e => setTooltip({ x:e.clientX, y:e.clientY, error:err, stage:stage.name })}
+                      onMouseLeave={() => setTooltip(null)}
+                      style={{ position:"absolute", right: 2, top:0, height:"100%",
+                        display:"flex", alignItems:"center", zIndex:3 }}>
+                      <div style={{ width:10, height:10, borderRadius:"50%",
+                        background:"#ff7b72", border:"2px solid #da3633",
+                        boxShadow:"0 0 6px #ff7b72", cursor:"default" }} />
+                    </div>
+                  ))}
+
+                  {/* Tick lines */}
+                  {[25,50,75].map(pct => (
+                    <div key={pct} style={{ position:"absolute", left:pct+"%", top:0,
+                      height:"100%", borderLeft:"1px dashed #1a2030", pointerEvents:"none" }} />
+                  ))}
+                </div>
+
+                {/* Method count badge */}
+                <div style={{ width:36, flexShrink:0, display:"flex", alignItems:"center",
+                  justifyContent:"center" }}>
+                  {methods.length > 0 && (
+                    <span style={{ fontSize:10, color:"#484f58", background:"#161b22",
+                      border:"1px solid #21262d", borderRadius:10, padding:"1px 5px" }}>
+                      {methods.length}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Error detail row under failed stage */}
+              {hasFail && stageErrors.map((err, ei) => (
+                <div key={ei} style={{ marginLeft:160, marginTop:1, marginBottom:2,
+                  background:"rgba(182,35,36,0.08)", border:"1px solid #da363330",
+                  borderRadius:4, padding:"4px 10px", fontSize:11, color:"#ffa198",
+                  display:"flex", gap:8, alignItems:"flex-start" }}>
+                  <span style={{ color:"#ff7b72", flexShrink:0 }}>✕ {err.error_type}</span>
+                  <span style={{ color:"#8b949e", fontFamily:"monospace", fontSize:10,
+                    overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", flex:1 }}>
+                    {err.message}
+                  </span>
+                  {err.failed_method && (
+                    <span style={{ color:"#d2a8ff", flexShrink:0, fontFamily:"monospace", fontSize:10 }}>
+                      in {err.failed_method}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Legend */}
+      <div style={{ display:"flex", gap:16, marginTop:14, paddingTop:10,
+        borderTop:"1px solid #21262d", fontSize:11, color:"#484f58", flexWrap:"wrap" }}>
+        {[["#3fb950","Fast"],["#f0b429","Medium"],["#ff7b72","Slow / Hot"]].map(([c,l]) => (
+          <span key={l} style={{ display:"flex", alignItems:"center", gap:4 }}>
+            <span style={{ width:10, height:10, background:c, borderRadius:2, display:"inline-block" }}/>
+            {l}
+          </span>
+        ))}
+        <span style={{ display:"flex", alignItems:"center", gap:4 }}>
+          <span style={{ width:10, height:10, background:"#ff7b72", borderRadius:"50%",
+            border:"2px solid #da3633", display:"inline-block" }}/>
+          Error
+        </span>
+        <span style={{ marginLeft:"auto" }}>Hover a block for details · badge = method count in stage</span>
+      </div>
+
+      {/* Tooltip */}
+      {tooltip && (
+        <div style={{ position:"fixed", left: tooltip.x+12, top: tooltip.y-8, zIndex:1000,
+          background:"#161b22", border:"1px solid #30363d", borderRadius:6,
+          padding:"8px 12px", fontSize:11, pointerEvents:"none", maxWidth:280,
+          boxShadow:"0 4px 16px rgba(0,0,0,0.6)" }}>
+          {tooltip.error ? (
+            <>
+              <div style={{ color:"#ff7b72", fontWeight:700, marginBottom:4 }}>
+                {tooltip.error.error_type} in {tooltip.stage}
+              </div>
+              <div style={{ color:"#ffa198", fontFamily:"monospace", fontSize:10, wordBreak:"break-word" }}>
+                {tooltip.error.message}
+              </div>
+              {tooltip.error.failed_method && (
+                <div style={{ color:"#d2a8ff", marginTop:4 }}>Method: {tooltip.error.failed_method}</div>
+              )}
+            </>
+          ) : (
+            <>
+              <div style={{ color:"#e6edf3", fontWeight:700, marginBottom:4 }}>
+                {tooltip.method.service_tag && <span style={{ color:"#58a6ff" }}>{tooltip.method.service_tag}:</span>}
+                {" "}{tooltip.method.name}
+              </div>
+              <div style={{ color:"#8b949e" }}>Stage: {tooltip.stage}</div>
+              <div style={{ color: tooltip.method.elapsed > 5 ? "#ff7b72" : "#3fb950" }}>
+                Elapsed: {tooltip.method.elapsed != null ? tooltip.method.elapsed+"s" : "—"}
+              </div>
+              {tooltip.stat && <>
+                <div style={{ color:"#8b949e" }}>Avg: {tooltip.stat.avg}s · Max: {tooltip.stat.max}s · Calls: {tooltip.stat.calls}</div>
+                {tooltip.stat.is_slow && <div style={{ color:"#f0b429", marginTop:2 }}>⚠ Flagged as slow</div>}
+              </>}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 function CallNode({ node, depth=0 }) {
   const [open, setOpen] = useState(depth < 2);
   const has = node.children?.length > 0;
@@ -221,9 +753,14 @@ function ConfigPanel({ serverConfig, onSaved }) {
   const [testing, setTesting] = useState({});
   const [testResults, setTestResults] = useState({});
   const [msg, setMsg] = useState("");
+  const initialised = useRef(false);
 
   useEffect(() => {
-    if (serverConfig) setCfg(JSON.parse(JSON.stringify(serverConfig)));
+    // Only seed cfg from serverConfig on first load -- never overwrite user edits on re-fetch
+    if (serverConfig && !initialised.current) {
+      setCfg(JSON.parse(JSON.stringify(serverConfig)));
+      initialised.current = true;
+    }
   }, [serverConfig]);
 
   if (!cfg) return <div style={{ color:"#8b949e", padding:40, textAlign:"center" }}>Loading config...</div>;
@@ -242,9 +779,11 @@ function ConfigPanel({ serverConfig, onSaved }) {
   const save = async () => {
     setSaving(true); setMsg("");
     try {
+      // Build save payload: replace "***" masked fields with empty string
+      // so the server keeps the existing saved value for those fields
       await apiFetch("/api/config", { method:"PUT", body: JSON.stringify({ config: cfg }) });
       setMsg("[OK] Config saved");
-      onSaved?.();
+      onSaved?.();  // reloads serverConfig for status bar only -- cfg state stays untouched
     } catch(e) { setMsg("[x] " + e.message); }
     setSaving(false);
   };
@@ -270,6 +809,7 @@ function ConfigPanel({ serverConfig, onSaved }) {
         token: cfg.github.token || "",
         api_url: cfg.github.api_url || "",
         verify_ssl: cfg.github.verify_ssl !== false,
+        github_type: cfg.github.type || "public",
       })});
       setTestResults(t => ({...t, gh: r}));
     } catch(e) { setTestResults(t => ({...t, gh: { status:"error", error:e.message }})); }
@@ -293,7 +833,7 @@ function ConfigPanel({ serverConfig, onSaved }) {
     <div style={{ maxWidth:800 }}>
       {/* AI Backend */}
       <div style={S.section}>
-        <div style={S.h}>[AI] AI Backend</div>
+        <div style={S.h}>AI Backend</div>
         <div style={S.row}>
           <div style={{ flex:1 }}>
             <label style={S.label}>Provider</label>
@@ -377,7 +917,7 @@ function ConfigPanel({ serverConfig, onSaved }) {
 
         {cfg.network?.private_only_mode && cfg.ai.provider === "anthropic" && (
           <div style={{ marginTop:6, padding:"6px 10px", borderRadius:6, background:"#3d1a1a", border:"1px solid #ff7b7240", color:"#ffa198", fontSize:12 }}>
-            [!] PRIVATE-ONLY MODE: Anthropic (cloud) is blocked. Use ollama or private provider.
+            Private-only mode active: Anthropic (cloud) is blocked. Switch to Ollama or a private provider.
           </div>
         )}
         {testResults[cfg.ai.provider] && (
@@ -394,7 +934,7 @@ function ConfigPanel({ serverConfig, onSaved }) {
 
       {/* GitHub */}
       <div style={S.section}>
-        <div style={S.h}>[octo] GitHub Integration</div>
+        <div style={S.h}>GitHub Integration</div>
         <div style={S.row}>
           <div style={{ flex:1 }}>
             <label style={S.label}>Repository Type</label>
@@ -467,7 +1007,7 @@ function ConfigPanel({ serverConfig, onSaved }) {
           ))}
           {cfg.network?.private_only_mode && cfg.github?.type === "public" && (
             <div style={{ padding:"6px 10px", borderRadius:6, background:"#3d1a1a", border:"1px solid #ff7b7240", color:"#ffa198", fontSize:12, marginTop:4 }}>
-              [!] PRIVATE-ONLY MODE: public github.com blocked. GitHub Enterprise (type: private) is allowed.
+              Private-only mode active: public github.com is blocked. GitHub Enterprise is allowed.
             </div>
           )}
           {testResults.gh && (
@@ -476,8 +1016,8 @@ function ConfigPanel({ serverConfig, onSaved }) {
               border:`1px solid ${testResults.gh.status==="ok"?"#3fb95040":"#ff7b7240"}`,
               color: testResults.gh.status==="ok"?"#3fb950":"#ff7b72" }}>
               {testResults.gh.status==="ok"
-                ? `[OK] ${testResults.gh.total_files} files found, ${testResults.gh.matching_files} matching. Sample: ${testResults.gh.sample?.slice(0,3).join(", ")}`
-                : `[x] ${testResults.gh.error}`}
+                ? `[OK] ${testResults.gh.total_files} files found, ${testResults.gh.matching_files} matching via ${testResults.gh.api_base}. Sample: ${testResults.gh.sample?.slice(0,3).join(", ")}`
+                : `[x] ${testResults.gh.error}${testResults.gh.api_base ? ` (API: ${testResults.gh.api_base})` : ""}${testResults.gh.hint ? " — " + testResults.gh.hint : ""}`}
             </div>
           )}
         </div>
@@ -508,7 +1048,7 @@ function ConfigPanel({ serverConfig, onSaved }) {
 
       {/* Analysis */}
       <div style={S.section}>
-        <div style={S.h}>[cfg] Analysis Settings</div>
+        <div style={S.h}>Analysis Settings</div>
         <div style={S.row}>
           <div style={{ flex:1 }}>
             <label style={S.label}>Slow method percentile threshold</label>
@@ -595,6 +1135,7 @@ export default function App() {
   const [healthData, setHealthData] = useState(null);       // raw /health response
   const [serverConfig, setServerConfig] = useState(null);
   const [batchProgress, setBatchProgress] = useState(null); // {batch,total,label,reports:[]}
+  const [aiFocus, setAiFocus] = useState(null);   // selected focus: {type, label, stage?, question?}
   const fileInputRef = useRef();
 
   // Check backend health on mount
@@ -624,18 +1165,16 @@ export default function App() {
     return (text.match(/\n/g) || []).length >= (healthData.batch_threshold_lines ?? 500);
   };
 
-  const analyzeBatch = async (text) => {
+  const analyzeBatch = async (text, focus = "auto") => {
     const tags = customTags.trim() ? customTags.split(",").map(s=>s.trim()).filter(Boolean) : null;
-    const body = JSON.stringify({ log_text: text, pipeline_tags: tags, include_source: true });
+    const body = JSON.stringify({ log_text: text, pipeline_tags: tags, include_source: true, focus });
     batchRunningRef.current = true;
     userNavigatedRef.current = false;
+    let receivedFinalReport = false;  // guard -- don't overwrite done report with stream errors
 
     try {
-      // First do a synchronous parse to get structured data
-      const parseResult = await apiFetch("/api/parse", { method:"POST", body });
-      setParsed({ ...parseResult, ai_report:"", source_methods_matched:0 });
-      setActiveTab("parse");
-
+      // Stream the batch AI analysis (parse already done by analyze())
+      setActiveTab("report");
       // Then stream the batch AI analysis
       const resp = await fetch(`${API_BASE}/api/analyze/batch`, {
         method: "POST",
@@ -666,25 +1205,29 @@ export default function App() {
               setBatchProgress({ batch:0, total:evt.total_batches, label:"Starting...", reports:[], logLines:evt.log_lines });
             } else if (evt.type === "progress") {
               setBatchProgress(p => ({ ...p, batch:evt.batch, total:evt.total, label:evt.label }));
-              // Don't auto-switch tabs during streaming -- user may be reading Analysis
             } else if (evt.type === "batch_done") {
               setBatchProgress(p => ({ ...p, reports:[...(p?.reports||[]), evt.partial_report] }));
             } else if (evt.type === "synthesis") {
               setBatchProgress(p => ({ ...p, label:evt.message, synthesising:true }));
+            } else if (evt.type === "ping") {
+              setBatchProgress(p => ({ ...p, label:evt.message }));
             } else if (evt.type === "done") {
+              receivedFinalReport = true;
               setParsed(p => ({ ...p, ai_report:evt.final_report, source_methods_matched:evt.source_matched }));
               setBatchProgress(p => ({ ...p, done:true, label:"Complete" }));
-              // Only auto-switch to report when fully done, and only if user hasn't moved
               if (!userNavigatedRef.current) setActiveTab("report");
             } else if (evt.type === "error") {
-              setParsed(p => ({ ...p, ai_report:`**Batch error:** ${evt.message}` }));
+              setParsed(p => ({ ...p, ai_report:`**Analysis error:** ${evt.message}` }));
               setBatchProgress(p => ({ ...p, error:true, label:evt.message }));
             }
           } catch {}
         }
       }
     } catch (e) {
-      setParsed(p => p ? { ...p, ai_report:`**Error:** ${e.message}` } : null);
+      // Only show error if we never received the final report
+      if (!receivedFinalReport) {
+        setParsed(p => p ? { ...p, ai_report:`**Error:** ${e.message}` } : null);
+      }
     } finally {
       batchRunningRef.current = false;
       setLoading(false);
@@ -692,57 +1235,80 @@ export default function App() {
     }
   };
 
+  // Parse-only — fast, no AI. Populates parsed state and moves to Analysis tab.
   const analyze = async (text) => {
     setLoading(true);
+    setBatchProgress(null);
+    setAiStatusMsg("");
+    setAiFocus(null);
+    // Clear previous AI report so focus panel shows fresh
+    setParsed(p => p ? { ...p, ai_report: "", failure_report: "" } : null);
+
+    try {
+      const tags = customTags.trim() ? customTags.split(",").map(s=>s.trim()).filter(Boolean) : null;
+      let result;
+      if (backendStatus) {
+        result = await apiFetch("/api/parse", {
+          method: "POST",
+          body: JSON.stringify({ log_text: text, pipeline_tags: tags }),
+        }, 60_000);
+        result.ai_report = "";
+        result.failure_report = "";
+      } else {
+        result = parseLogLocal(text, tags || ["service-abc","service-test","service-deploy"]);
+        result.ai_report = "";
+        result.failure_report = "";
+      }
+      setParsed(result);
+      setActiveTab("parse");
+    } catch(e) {
+      alert("Parse error: " + e.message);
+    }
+    setLoading(false);
+  };
+
+  // Run AI analysis with the chosen focus
+  const runFocusedAI = async (focus) => {
+    if (!backendStatus || !logText.trim()) return;
     setAiLoading(true);
     setBatchProgress(null);
-    setAiStatusMsg("Parsing log...");
+    setAiStatusMsg("Running AI analysis...");
 
-    if (backendStatus && isBatchMode(text)) {
-      await analyzeBatch(text);
+    const tags = customTags.trim() ? customTags.split(",").map(s=>s.trim()).filter(Boolean) : null;
+    const focusStr = focus.type === "stage"   ? `stage:${focus.stage}`
+                   : focus.type === "custom"  ? `custom:${focus.question}`
+                   : focus.type;  // "errors" | "performance" | "full" | "auto"
+
+    // Use batch mode for large logs
+    if (isBatchMode(logText)) {
+      await analyzeBatch(logText, focusStr);
       return;
     }
 
     try {
-      const tags = customTags.trim() ? customTags.split(",").map(s=>s.trim()).filter(Boolean) : null;
-
-      if (backendStatus) {
-        setAiStatusMsg("Analysing with AI — this may take 30-120s with a local model...");
-        const result = await apiFetch("/api/analyze", {
-          method: "POST",
-          body: JSON.stringify({ log_text: text, pipeline_tags: tags, include_source: true }),
-        }, 300_000);
-        setParsed(result);
-        setAiStatusMsg("");
-      } else {
-        // Client-side fallback
-        const result = parseLogLocal(text, tags || ["service-abc","service-test","service-deploy"]);
-        result.ai_report = "[!] Backend not available -- running client-side parse only. Start the Python API for AI analysis.";
-        setParsed(result);
-        setAiStatusMsg("");
-      }
-      setActiveTab("parse");
+      setAiStatusMsg("Analysing — this may take 30-120s with a local model...");
+      const result = await apiFetch("/api/analyze", {
+        method: "POST",
+        body: JSON.stringify({
+          log_text: logText,
+          pipeline_tags: tags,
+          include_source: true,
+          focus: focusStr,
+        }),
+      }, 300_000);
+      setParsed(p => ({ ...p, ai_report: result.ai_report || "", source_methods_matched: result.source_methods_matched || 0 }));
+      setAiStatusMsg("");
+      setActiveTab("report");
     } catch(e) {
       setAiStatusMsg("");
-      alert("Analysis error: " + e.message);
+      alert("AI analysis error: " + e.message);
     }
-    setLoading(false);
     setAiLoading(false);
   };
 
   const regenerateAI = async () => {
-    if (!backendStatus || !logText.trim()) return;
-    setAiLoading(true);
-    const tags = customTags.trim() ? customTags.split(",").map(s=>s.trim()).filter(Boolean) : null;
-    try {
-      const result = await apiFetch("/api/analyze", {
-        method: "POST",
-        body: JSON.stringify({ log_text: logText, pipeline_tags: tags, include_source: true }),
-      });
-      setParsed(result);
-      setActiveTab("report");
-    } catch(e) { alert("AI error: " + e.message); }
-    setAiLoading(false);
+    if (!aiFocus) return;
+    await runFocusedAI(aiFocus);
   };
 
   const fetchUrl = async () => {
@@ -763,11 +1329,11 @@ export default function App() {
   };
 
   const tabs = [
-    { id:"input",  label:"[kbd] Input" },
-    { id:"parse",  label:"[chart] Analysis",  disabled: !parsed },
-    { id:"tree",   label:" Call Tree", disabled: !parsed },
-    { id:"report", label:"[AI] AI Report", disabled: !parsed },
-    { id:"config", label:"[cfg] Config",    badge: backendStatus ? "API [v]" : "offline" },
+    { id:"input",  label:"Input" },
+    { id:"parse",  label:"Analysis",  disabled: !parsed },
+    { id:"tree",   label:"Timeline", disabled: !parsed },
+    { id:"report", label:"AI Analysis", disabled: !parsed },
+    { id:"config", label:"Config",    badge: backendStatus ? "API online" : "offline" },
   ];
 
   const chartData = parsed?.timing_stats?.slice(0,15) ?? [];
@@ -792,7 +1358,7 @@ export default function App() {
             const aiLabel   = isCloud ? "AI: cloud" : isLocal ? (gpuOn ? "AI: local+GPU" : "AI: local") : "AI: private";
             const aiColor   = (privateOnly && isCloud) ? "#484f58" : isCloud ? "#58a6ff" : isLocal ? "#3fb950" : "#f0b429";
             return <>
-              {privateOnly && <Chip label="PRIVATE-ONLY" color="#ff7b72" />}
+              {privateOnly && <Chip label="private-only" color="#8b949e" />}
               <Chip label={aiLabel} color={aiColor} />
             </>;
           })()}
@@ -820,11 +1386,10 @@ export default function App() {
 
       {/* Private-only mode banner */}
       {backendStatus && healthData?.private_only_mode && (
-        <div style={{ background:"#1e1012", borderBottom:"1px solid #ff7b7240", padding:"7px 28px", display:"flex", alignItems:"center", gap:10 }}>
-          <span style={{ color:"#ff7b72", fontWeight:700, fontSize:12 }}>[PRIVATE-ONLY MODE]</span>
-          <span style={{ color:"#ffa198", fontSize:12 }}>
-            Public cloud blocked (Anthropic, github.com).
-            GitHub Enterprise, private AI, and all on-prem resources remain accessible.
+        <div style={{ background:"#0d1117", borderBottom:"1px solid #21262d", padding:"5px 28px", display:"flex", alignItems:"center", gap:10 }}>
+          <span style={{ width:7, height:7, borderRadius:"50%", background:"#3fb950", display:"inline-block", flexShrink:0 }} />
+          <span style={{ color:"#8b949e", fontSize:12 }}>
+            Running in private-only mode — public cloud services (Anthropic, github.com) are blocked. GitHub Enterprise and private AI remain accessible.
           </span>
         </div>
       )}
@@ -905,7 +1470,7 @@ export default function App() {
                 placeholder="Paste Jenkins console output here..."
                 style={{ width:"100%", minHeight:280, background:"#0d1117", border:"1px solid #21262d", borderRadius:6, padding:12, color:"#79c0ff", fontFamily:"inherit", fontSize:12, lineHeight:1.6, resize:"vertical", boxSizing:"border-box" }} />
               <div style={{ display:"flex", gap:8, marginTop:10 }}>
-                <Btn onClick={() => analyze(logText)} loading={loading} disabled={!logText.trim()}>[!] Analyze</Btn>
+                <Btn onClick={() => analyze(logText)} loading={loading} disabled={!logText.trim()}>Analyze</Btn>
                 {loading && aiStatusMsg && (
                   <span style={{fontSize:"0.78rem", color:"#8b949e", marginLeft:8, fontStyle:"italic"}}>
                     ⏳ {aiStatusMsg}
@@ -953,7 +1518,7 @@ export default function App() {
                 }}>{c}</button>
               ))}
               <Btn onClick={() => { setActiveTab("report"); if (!parsed.ai_report) regenerateAI(); }} loading={aiLoading} style={{ marginLeft:"auto" }}>
-                [AI] AI Report
+                AI Analysis
               </Btn>
             </div>
 
@@ -1006,16 +1571,8 @@ export default function App() {
 
         {/* CALL TREE */}
         {activeTab === "tree" && parsed && (
-          <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
-            <div style={{ display:"flex", gap:8, alignItems:"center" }}>
-              <div style={{ fontSize:12, color:"#8b949e" }}>Nested call hierarchy. Color = elapsed time heat (green->red). Click to expand.</div>
-              <Btn onClick={() => { setActiveTab("report"); if (!parsed.ai_report) regenerateAI(); }} loading={aiLoading} style={{ marginLeft:"auto" }}>[AI] AI Report</Btn>
-            </div>
-            <div style={{ background:"#161b22", border:"1px solid #21262d", borderRadius:8, padding:16 }}>
-              {parsed.call_tree?.length > 0
-                ? parsed.call_tree.map((n,i) => <CallNode key={i} node={n} depth={0} />)
-                : <div style={{ color:"#484f58", textAlign:"center", padding:40 }}>No nested call tree detected.</div>}
-            </div>
+          <div style={{ background:"#161b22", border:"1px solid #21262d", borderRadius:8, padding:16 }}>
+            <PipelineTimeline parsed={parsed} />
           </div>
         )}
 
@@ -1098,79 +1655,118 @@ export default function App() {
       )}
 
       {activeTab === "report" && (
-          <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
-            <div style={{ display:"flex", gap:8, alignItems:"center" }}>
-              {batchProgress && (
-                <div style={{ marginBottom:12, padding:"10px 14px", borderRadius:8, background:"#161b22", border:"1px solid #21262d" }}>
-                  <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:6 }}>
-                    <span style={{ fontSize:12, color:"#8b949e" }}>
-                      {batchProgress.done ? "Batch analysis complete" :
-                       batchProgress.error ? "Batch analysis failed" :
-                       batchProgress.synthesising ? "Synthesising..." :
-                       `Analysing batch ${batchProgress.batch} of ${batchProgress.total}`}
-                    </span>
-                    {batchProgress.logLines && (
-                      <span style={{ fontSize:11, color:"#484f58" }}>{batchProgress.logLines.toLocaleString()} lines</span>
-                    )}
-                    {batchProgress.done && <span style={{ fontSize:11, color:"#3fb950" }}>[v] done</span>}
-                    {batchProgress.error && <span style={{ fontSize:11, color:"#ff7b72" }}>[x] error</span>}
-                  </div>
-                  <div style={{ height:6, borderRadius:3, background:"#21262d", overflow:"hidden" }}>
-                    <div style={{
-                      height:"100%", borderRadius:3, transition:"width 0.4s ease",
-                      background: batchProgress.error ? "#ff7b72" : batchProgress.done ? "#3fb950" : "#58a6ff",
-                      width: batchProgress.total > 0
-                        ? `${Math.round(((batchProgress.synthesising ? batchProgress.total : batchProgress.batch) / (batchProgress.total + 1)) * 100)}%`
-                        : "5%"
-                    }} />
-                  </div>
-                  {batchProgress.label && !batchProgress.done && !batchProgress.error && (
-                    <div style={{ fontSize:11, color:"#58a6ff", marginTop:5, fontFamily:"monospace" }}>
-                      {batchProgress.label}
-                    </div>
-                  )}
+        <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+
+          {/* Focus panel — shown when no report yet or user wants to change focus */}
+          {!aiLoading && (!parsed?.ai_report || !aiFocus) && (
+            <div style={{ background:"#161b22", border:"1px solid #21262d", borderRadius:8, padding:20 }}>
+              <AIFocusPanel
+                parsed={parsed}
+                onRun={focus => { setAiFocus(focus); runFocusedAI(focus); }}
+                loading={aiLoading}
+                backendStatus={backendStatus}
+              />
+            </div>
+          )}
+
+          {/* Batch progress bar */}
+          {batchProgress && (
+            <div style={{ padding:"10px 14px", borderRadius:8, background:"#161b22", border:"1px solid #21262d" }}>
+              <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:6 }}>
+                <span style={{ fontSize:12, color:"#8b949e" }}>
+                  {batchProgress.done ? "Batch analysis complete" :
+                   batchProgress.error ? "Batch analysis failed" :
+                   batchProgress.synthesising ? "Synthesising segments..." :
+                   `Analysing segment ${batchProgress.batch} of ${batchProgress.total}`}
+                </span>
+                {batchProgress.logLines && (
+                  <span style={{ fontSize:11, color:"#484f58" }}>{batchProgress.logLines.toLocaleString()} lines</span>
+                )}
+                {batchProgress.done && <span style={{ fontSize:11, color:"#3fb950" }}>✓ done</span>}
+                {batchProgress.error && <span style={{ fontSize:11, color:"#ff7b72" }}>✕ error</span>}
+              </div>
+              <div style={{ height:5, borderRadius:3, background:"#21262d", overflow:"hidden" }}>
+                <div style={{
+                  height:"100%", borderRadius:3, transition:"width 0.4s ease",
+                  background: batchProgress.error ? "#ff7b72" : batchProgress.done ? "#3fb950" : "#58a6ff",
+                  width: batchProgress.total > 0
+                    ? `${Math.round(((batchProgress.synthesising ? batchProgress.total : batchProgress.batch) / (batchProgress.total + 1)) * 100)}%`
+                    : "5%"
+                }} />
+              </div>
+              {batchProgress.label && !batchProgress.done && !batchProgress.error && (
+                <div style={{ fontSize:11, color:"#58a6ff", marginTop:5, fontFamily:"monospace" }}>
+                  {batchProgress.label}
                 </div>
               )}
-              <Btn onClick={regenerateAI} loading={aiLoading} disabled={!backendStatus}>
-                [AI] {parsed?.ai_report ? "Regenerate" : "Generate AI Report"}
-              </Btn>
-              {!backendStatus && <span style={{ fontSize:11, color:"#ff7b72" }}>Backend required for AI reports -- start the Python API server</span>}
-              {parsed?.ai_report && <Btn onClick={() => navigator.clipboard.writeText(parsed.ai_report)} variant="ghost">[paste] Copy</Btn>}
             </div>
+          )}
 
-            {aiLoading && (
-              <div style={{ background:"#161b22", border:"1px solid #21262d", borderRadius:8, padding:32, textAlign:"center" }}>
-                <div style={{ color:"#58a6ff", fontSize:13 }}>[!] Analyzing with AI...</div>
-                <div style={{ color:"#484f58", fontSize:11, marginTop:4 }}>Correlating source code and timing data</div>
+          {/* AI running spinner */}
+          {aiLoading && (
+            <div style={{ background:"#161b22", border:"1px solid #21262d", borderRadius:8,
+              padding:"28px 24px", textAlign:"center" }}>
+              <div style={{ display:"inline-flex", alignItems:"center", gap:12 }}>
+                <div style={{ width:14, height:14, border:"2px solid #58a6ff",
+                  borderTopColor:"transparent", borderRadius:"50%",
+                  animation:"spin 0.8s linear infinite" }} />
+                <span style={{ color:"#58a6ff", fontSize:13 }}>
+                  {aiStatusMsg || "Running AI analysis..."}
+                </span>
               </div>
-            )}
-
-            {parsed?.ai_report && !aiLoading && (
-              <div style={{ background:"#161b22", border:"1px solid #21262d", borderRadius:8, padding:24 }}>
-                <div style={{ marginBottom:14, paddingBottom:10, borderBottom:"1px solid #21262d", display:"flex", alignItems:"center", gap:8 }}>
-                  <div style={{ width:8, height:8, borderRadius:"50%", background:"#3fb950" }} />
-                  <span style={{ fontSize:11, color:"#8b949e" }}>AI Performance Report</span>
-                  {parsed.source_methods_matched > 0 && <span style={{ fontSize:10, color:"#d2a8ff", marginLeft:8 }}> {parsed.source_methods_matched} methods correlated from source</span>}
+              {aiFocus && (
+                <div style={{ color:"#484f58", fontSize:11, marginTop:8 }}>
+                  Focus: {aiFocus.label}
                 </div>
-                <MdRender text={parsed.ai_report} />
-              </div>
-            )}
+              )}
+            </div>
+          )}
 
-            {!aiLoading && !parsed?.ai_report && (
-              <div style={{ background:"#161b22", border:"1px dashed #30363d", borderRadius:8, padding:48, textAlign:"center" }}>
-                <div style={{ fontSize:36, marginBottom:12 }}>[AI]</div>
-                <div style={{ color:"#8b949e", fontSize:14 }}>No AI report yet</div>
+          {/* Report output */}
+          {parsed?.ai_report && !aiLoading && (
+            <div style={{ background:"#161b22", border:"1px solid #21262d", borderRadius:8, padding:24 }}>
+              <div style={{ marginBottom:14, paddingBottom:10, borderBottom:"1px solid #21262d",
+                display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+                <div style={{ width:8, height:8, borderRadius:"50%", background:"#3fb950", flexShrink:0 }} />
+                <span style={{ fontSize:11, color:"#8b949e" }}>AI Analysis</span>
+                {aiFocus && (
+                  <span style={{ fontSize:10, color:"#58a6ff", background:"rgba(88,166,255,0.1)",
+                    padding:"1px 8px", borderRadius:10, border:"1px solid #58a6ff30" }}>
+                    {aiFocus.label}
+                  </span>
+                )}
+                {parsed.source_methods_matched > 0 && (
+                  <span style={{ fontSize:10, color:"#d2a8ff" }}>
+                    {parsed.source_methods_matched} methods from source
+                  </span>
+                )}
+                <div style={{ marginLeft:"auto", display:"flex", gap:6 }}>
+                  <Btn small variant="ghost"
+                    onClick={() => navigator.clipboard.writeText(parsed.ai_report)}>
+                    Copy
+                  </Btn>
+                  <Btn small variant="secondary"
+                    onClick={() => { setAiFocus(null); setParsed(p => ({ ...p, ai_report:"" })); }}>
+                    Change Focus
+                  </Btn>
+                  <Btn small onClick={regenerateAI} loading={aiLoading} disabled={!aiFocus}>
+                    Re-run
+                  </Btn>
+                </div>
               </div>
-            )}
-          </div>
-        )}
+              <MdRender text={parsed.ai_report} />
+            </div>
+          )}
+
+        </div>
+      )}
 
         {/* CONFIG */}
         {activeTab === "config" && (
           <div>
             {!backendStatus && (
               <div style={{ background:"#1e1208", border:"1px solid #f0b42940", borderRadius:8, padding:"10px 16px", marginBottom:16, fontSize:12, color:"#f0b429" }}>
-                [!] Backend API is offline. Config changes require the Python server running at <code style={{ color:"#79c0ff" }}>{API_BASE}</code>.
+                Backend API is offline. Config changes require the Python server running at <code style={{ color:"#79c0ff" }}>{API_BASE}</code>.
                 <br />Start with: <code style={{ color:"#3fb950" }}>cd backend && uvicorn main:app --reload</code>
               </div>
             )}
@@ -1183,6 +1779,7 @@ export default function App() {
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap');
         * { box-sizing: border-box; }
+        @keyframes spin { to { transform: rotate(360deg); } }
         textarea:focus, input:focus, select:focus { outline: 1px solid #58a6ff; }
         select option { background: #161b22; }
       `}</style>

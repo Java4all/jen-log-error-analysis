@@ -164,7 +164,7 @@ class GitHubClient:
         }
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        base = (api_url.rstrip("/") if api_url else self.API_BASE)
+        base = (api_url.rstrip("/") if api_url else self.API_BASE) + "/"
         self._client = httpx.AsyncClient(
             base_url=base,
             headers=headers,
@@ -188,7 +188,7 @@ class GitHubClient:
 
     async def list_tree(self, owner: str, repo: str, branch: str, path: str = "") -> list[dict]:
         """List files in a directory recursively."""
-        url = f"/repos/{owner}/{repo}/git/trees/{branch}?recursive=1"
+        url = f"repos/{owner}/{repo}/git/trees/{branch}?recursive=1"
         resp = await self._client.get(url)
         resp.raise_for_status()
         tree = resp.json().get("tree", [])
@@ -199,7 +199,7 @@ class GitHubClient:
 
     async def get_file(self, owner: str, repo: str, path: str, branch: str) -> str:
         """Fetch file content decoded from base64."""
-        resp = await self._client.get(f"/repos/{owner}/{repo}/contents/{path}?ref={branch}")
+        resp = await self._client.get(f"repos/{owner}/{repo}/contents/{path}?ref={branch}")
         resp.raise_for_status()
         data = resp.json()
         content = data.get("content", "")

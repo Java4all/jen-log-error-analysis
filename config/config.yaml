@@ -83,7 +83,11 @@ pipeline:
   # Timing line pattern -- no ^ anchor needed, search() finds it anywhere
   timing_pattern: "([\\w_]+)\\s*\\(?\\)?:time-elapsed-seconds:([\\d.]+)"
 
-  # Stage detection regex
+  # Stage detection regex -- matches custom single-line stage markers.
+  # The following are auto-detected WITHOUT configuration:
+  #   [Pipeline] stage          (two-line Jenkins Declarative Pipeline form)
+  #   [Pipeline] { (StageName)  (single-line Pipeline form)
+  # Only change this if your logs use a custom stage marker format other than the above.
   stage_pattern: "StageName:\\s*(.+)"
 
   # Timestamp extraction regex -- only used to extract the timestamp value

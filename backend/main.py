@@ -2,6 +2,7 @@
 main.py -- FastAPI application for Jenkins Performance Analyzer.
 """
 from __future__ import annotations
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -30,6 +31,7 @@ from log_parser import (
     serialize_call_tree,
     build_analysis_prompt,
     build_failure_analysis_prompt,
+    build_focused_prompt,
     split_into_batches,
     build_batch_prompt,
     build_synthesis_prompt,
@@ -103,6 +105,14 @@ class AnalyzeRequest(BaseModel):
     pipeline_tags: Optional[list[str]] = None
     ai_provider: Optional[str] = None
     include_source: bool = True
+    # Focus tells the AI what to concentrate on.
+    # "auto"          -- pick best prompt based on what was detected (default)
+    # "errors"        -- root cause analysis of detected errors
+    # "performance"   -- bottleneck and slow method analysis
+    # "full"          -- errors + performance combined
+    # "stage:<name>"  -- deep-dive a specific stage
+    # "custom:<text>" -- answer a specific user question about the log
+    focus: str = "auto"
 
 
 class AnalyzeResponse(BaseModel):
@@ -135,6 +145,7 @@ class RepoTestRequest(BaseModel):
     token: str = ""
     api_url: str = ""
     verify_ssl: bool = True
+    github_type: str = ""  # "public" | "private" -- live UI value for private_only check
 
 
 class HealthResponse(BaseModel):
@@ -352,48 +363,28 @@ async def analyze_log(req: AnalyzeRequest):
         except Exception as e:
             logger.warning(f"Source correlation failed: {e}")
 
-    # Run performance analysis and (if build failed) failure analysis in parallel
-    ai_report = ""
-    failure_report = ""
+    # Route to focused prompt based on req.focus
+    focus = req.focus or "auto"
+    combined_source = error_source_context or source_context
 
-    async def run_perf_analysis():
-        try:
-            sys_p, usr_p = build_analysis_prompt(
-                result, req.log_text,
-                source_context=source_context,
-                max_log_chars=cfg.analysis.max_log_chars_for_ai,
-            )
-            return await ai_complete(sys_p, usr_p, provider=req.ai_provider)
-        except AIServiceError as e:
-            return f"**AI analysis unavailable:** {e}"
-        except Exception as e:
-            logger.error(f"Perf AI error: {e}", exc_info=True)
-            return f"**AI analysis error:** {e}"
-
-    async def run_failure_analysis():
-        if not result.errors:
-            return ""
-        try:
-            sys_f, usr_f = build_failure_analysis_prompt(
-                result, req.log_text,
-                error_source_context=error_source_context,
-                max_context_chars=cfg.analysis.max_log_chars_for_ai,
-            )
-            return await ai_complete(sys_f, usr_f, provider=req.ai_provider)
-        except Exception as e:
-            logger.error(f"Failure AI error: {e}", exc_info=True)
-            return f"**Failure analysis error:** {e}"
-
-    import asyncio as _asyncio
-    ai_report, failure_report = await _asyncio.gather(
-        run_perf_analysis(), run_failure_analysis()
-    )
+    try:
+        sys_p, usr_p = build_focused_prompt(
+            result, req.log_text,
+            focus=focus,
+            source_context=combined_source,
+        )
+        ai_report = await ai_complete(sys_p, usr_p, provider=req.ai_provider)
+    except AIServiceError as e:
+        ai_report = f"**AI analysis unavailable:** {e}"
+    except Exception as e:
+        logger.error(f"AI analysis error (focus={focus}): {e}", exc_info=True)
+        ai_report = f"**AI analysis error:** {e}"
 
     return AnalyzeResponse(
         **data,
         source_methods_matched=source_matched,
         ai_report=ai_report,
-        failure_report=failure_report,
+        failure_report="",
     )
 
 
@@ -549,16 +540,31 @@ async def analyze_batch(req: AnalyzeRequest):
                 final_report = batch_reports[0]
             else:
                 global_summary = batches[0].global_summary if batches else ""
-                # build_synthesis_prompt truncates segments internally (800 chars each)
-                sys_s, usr_s = build_synthesis_prompt(batch_reports, result, global_summary)
+                focus = req.focus or "auto"
+                sys_s, usr_s = build_synthesis_prompt(batch_reports, result, global_summary, focus=focus)
                 synthesis_timeout = cfg.ai.ollama.synthesis_timeout if cfg.ai.provider == "ollama" else 600
                 logger.info(f"Synthesis: {len(batch_reports)} segments, prompt={len(usr_s)} chars, timeout={synthesis_timeout}s")
                 try:
-                    final_report = await provider.complete(sys_s, usr_s, timeout=synthesis_timeout)
+                    # Run synthesis and send SSE keepalive pings every 20s so nginx
+                    # proxy_read_timeout doesn't kill the connection during long Ollama calls
+                    synthesis_task = asyncio.create_task(
+                        provider.complete(sys_s, usr_s, timeout=synthesis_timeout)
+                    )
+                    ping_interval = 20
+                    elapsed = 0
+                    while not synthesis_task.done():
+                        try:
+                            final_report = await asyncio.wait_for(
+                                asyncio.shield(synthesis_task), timeout=ping_interval
+                            )
+                            break
+                        except asyncio.TimeoutError:
+                            elapsed += ping_interval
+                            yield sse({"type": "ping", "message": f"Synthesising... ({elapsed}s)"})
                 except Exception as e:
                     logger.error(f"Synthesis failed: {e}")
                     # Fall back to concatenating reports with a header
-                    final_report = "## Build Analysis (segments)\n\n" + "\n\n---\n\n".join(batch_reports)
+                    final_report = "## Build AI Analysis (segments)\n\n" + "\n\n---\n\n".join(batch_reports)
 
             yield sse({"type": "done", "final_report": final_report, "source_matched": source_matched})
 
@@ -662,8 +668,10 @@ async def test_ai(body: dict = None):
 async def test_github(req: RepoTestRequest):
     """Test GitHub repo access using live UI values (not requiring a prior save)."""
     cfg = get_config()
-    # Only block public github.com -- GitHub Enterprise is allowed
-    if _github_is_public(cfg.github.type):
+    # Use live type from UI if provided, fall back to saved config
+    effective_type = req.github_type if req.github_type else cfg.github.type
+    # Only block public github.com -- GitHub Enterprise is always allowed
+    if _github_is_public(effective_type):
         check_private_only("connectivity test via public github.com")
 
     # Use live values from UI if provided, fall back to saved config
@@ -678,13 +686,12 @@ async def test_github(req: RepoTestRequest):
         api_url=effective_api_url,
     )
     try:
-        # Parse owner/repo from URL -- works for both github.com and GitHub Enterprise
-        # e.g. https://github.mycompany.com/owner/repo or https://github.com/owner/repo
         import re as _re
         m = _re.search(r"https?://[^/]+/([^/]+)/([^/\s]+?)(?:\.git)?$", req.url.strip())
         if not m:
             return {"status": "error", "error": f"Cannot parse owner/repo from URL: {req.url}"}
         owner, repo = m.group(1), m.group(2)
+        api_base = (effective_api_url.rstrip("/") if effective_api_url else "https://api.github.com")
         files = await client.list_tree(owner, repo, req.branch)
         matching = [
             f["path"] for f in files
@@ -695,9 +702,11 @@ async def test_github(req: RepoTestRequest):
             "total_files": len(files),
             "matching_files": len(matching),
             "sample": matching[:10],
+            "api_base": api_base,
         }
     except Exception as e:
-        return {"status": "error", "error": str(e)}
+        api_base = (effective_api_url.rstrip("/") if effective_api_url else "https://api.github.com")
+        return {"status": "error", "error": str(e), "api_base": api_base, "hint": "Check api_url, token, and verify_ssl settings"}
     finally:
         await client.close()
 

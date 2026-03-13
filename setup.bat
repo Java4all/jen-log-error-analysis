@@ -33,32 +33,37 @@ echo.
 echo   =========================================================
 echo   Choose a run mode:
 echo.
-echo   [1] Cloud AI only    - Anthropic / private endpoint (no local model)
+echo   [1] Cloud AI only         - Anthropic / private endpoint (no local model)
 echo       Any machine. Requires ANTHROPIC_API_KEY in .env.
 echo.
-echo   [2] Local Ollama CPU - Ollama running on CPU (no GPU needed)
-echo       Works on any machine including Mac and Windows without NVIDIA.
+echo   [2] Dockerized Ollama CPU  - Ollama in Docker on CPU (Mac, Linux, Windows)
+echo       First run downloads the model automatically.
 echo.
-echo   [3] Local Ollama GPU - Ollama with NVIDIA GPU (Windows / Linux)
+echo   [3] Host Ollama            - Use Ollama installed on this machine (not Docker)
+echo       Mac recommended. Faster start, no container overhead.
+echo       Requires: ollama serve  (running with OLLAMA_HOST=0.0.0.0 on Mac/Linux)
+echo.
+echo   [4] Ollama GPU             - Ollama with NVIDIA GPU (Windows / Linux)
 echo       Requires NVIDIA GPU + Docker Desktop WSL2 GPU passthrough.
 echo.
-echo   [4] Stop             - Stop all containers
-echo   [5] Logs             - View container logs
-echo   [6] Status           - Show running containers
-echo   [7] Check GPU        - Verify NVIDIA prerequisites
-echo   [8] Open app         - Open browser to frontend
+echo   [5] Stop             - Stop all containers
+echo   [6] Logs             - View container logs
+echo   [7] Status           - Show running containers
+echo   [8] Check GPU        - Verify NVIDIA prerequisites
+echo   [9] Open app         - Open browser to frontend
 echo   [Q] Quit
 echo.
 set /p CHOICE=  Enter choice: 
 
 if /i "%CHOICE%"=="1" goto CLOUD
 if /i "%CHOICE%"=="2" goto CPU
-if /i "%CHOICE%"=="3" goto GPU
-if /i "%CHOICE%"=="4" goto STOP
-if /i "%CHOICE%"=="5" goto LOGS
-if /i "%CHOICE%"=="6" goto STATUS
-if /i "%CHOICE%"=="7" goto CHECKGPU
-if /i "%CHOICE%"=="8" goto OPEN
+if /i "%CHOICE%"=="3" goto HOSTOLLAMA
+if /i "%CHOICE%"=="4" goto GPU
+if /i "%CHOICE%"=="5" goto STOP
+if /i "%CHOICE%"=="6" goto LOGS
+if /i "%CHOICE%"=="7" goto STATUS
+if /i "%CHOICE%"=="8" goto CHECKGPU
+if /i "%CHOICE%"=="9" goto OPEN
 if /i "%CHOICE%"=="Q" goto END
 if /i "%CHOICE%"=="q" goto END
 goto END
@@ -80,6 +85,16 @@ powershell -ExecutionPolicy Bypass -File make.ps1 up-ollama
 pause
 goto END
 
+:HOSTOLLAMA
+echo.
+echo   Starting with host-native Ollama...
+echo   Make sure Ollama is running: ollama serve
+echo   (On Mac/Linux set OLLAMA_HOST=0.0.0.0 so Docker can reach it)
+echo.
+docker compose -f docker-compose.yml -f docker-compose.host-ollama.yml up --build -d
+pause
+goto END
+
 :GPU
 echo.
 echo   Starting local Ollama (GPU mode, requires NVIDIA)...
@@ -92,6 +107,7 @@ echo.
 echo   Stopping all containers...
 docker compose down
 docker compose --profile ollama down 2>nul
+docker compose -f docker-compose.yml -f docker-compose.host-ollama.yml down 2>nul
 pause
 goto END
 

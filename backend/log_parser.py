@@ -83,8 +83,13 @@ class ErrorEvent:
 # Cover real-world Jenkins/Pipeline/Maven/Gradle log formats so the tool works
 # out-of-the-box without requiring custom pattern configuration.
 
-# [Pipeline] { (Build)
+# [Pipeline] { (Build)  -- single line form
 _PIPELINE_STAGE_RE = re.compile(r"\[Pipeline\]\s+\{\s+\((.+?)\)")
+# [Pipeline] stage  -- first of the two-line form (sentinel line)
+_PIPELINE_STAGE_SENTINEL_RE = re.compile(r"\[Pipeline\]\s+stage\s*$")
+# [Pipeline] { (name)  or  [Pipeline] deleteSomething  -- second line of two-line form
+# captures the name from { (name) } pattern
+_PIPELINE_STAGE_NAME_RE = re.compile(r"\[Pipeline\]\s+(?:\{\s*\((.+?)\)|[\w]+\s+\((.+?)\))")
 # Maven plugin phase: [INFO] --- maven-surefire-plugin:2.22.2:test ...
 _MAVEN_PHASE_RE = re.compile(r"\[INFO\]\s+---\s+[\w.\-]+:([\w\-]+)\s+")
 # Time elapsed: 1.234 s
@@ -124,7 +129,7 @@ def _detect_log_format(lines: list[str], static_tags: list[str] | None = None) -
 
     # Fall back to standard format detection on first 200 lines
     sample = lines[:200]
-    pipeline_hits = sum(1 for l in sample if "[Pipeline]" in l)
+    pipeline_hits = sum(1 for l in sample if "[Pipeline]" in l or _PIPELINE_STAGE_SENTINEL_RE.search(l.strip()))
     maven_hits    = sum(1 for l in sample if "[INFO]" in l or "[ERROR]" in l)
     gradle_hits   = sum(1 for l in sample if l.strip().startswith("> Task") or "BUILD SUCCESSFUL" in l)
     if pipeline_hits >= 3:
@@ -161,6 +166,17 @@ def _parse_standard(lines: list[str], fmt: str, slow_percentile: int) -> tuple:
             m = _PIPELINE_STAGE_RE.search(line)
             if m:
                 stage_name = m.group(1).strip()
+            elif _PIPELINE_STAGE_SENTINEL_RE.search(trimmed):
+                # Two-line form: "[Pipeline] stage" followed by "[Pipeline] { (Name) }"
+                # Peek at next non-empty line for the actual name
+                for j in range(i + 1, min(i + 4, len(lines))):
+                    next_line = lines[j].strip()
+                    if not next_line:
+                        continue
+                    nm = _PIPELINE_STAGE_NAME_RE.search(next_line)
+                    if nm:
+                        stage_name = (nm.group(1) or nm.group(2) or "").strip()
+                    break
         elif fmt in ("maven", "gradle", "unknown"):
             m = _STAGE_LABEL_RE.search(line)
             if m:
@@ -332,7 +348,11 @@ class JenkinsLogParser:
         warnings: list[str] = extra_warn
         global_duration = 0.0
 
+        _skip_line: int = -1  # line index already consumed by two-line stage peek-ahead
         for line_idx, line in enumerate(lines):
+            if line_idx == _skip_line:
+                continue  # already consumed as the name line of a two-line stage marker
+
             trimmed = line.strip()
             if not trimmed:
                 continue
@@ -342,15 +362,37 @@ class JenkinsLogParser:
             ts = ts_match.group(1) if ts_match else None
 
             # -- Stage detection ----------------------------------------------
-            # Use search() not match() so patterns find their target anywhere
-            # in the line -- timestamps, log prefixes etc. are ignored naturally.
+            # Handles three stage marker forms:
+            #   1. Custom single-line:  StageName: Build
+            #   2. Pipeline single-line: [Pipeline] { (Build)
+            #   3. Pipeline two-line:   [Pipeline] stage
+            #                           [Pipeline] { (Build)   (or deleteSomething (name))
+            stage_name_found: Optional[str] = None
+
             stage_m = self.stage_re.search(trimmed)
             if stage_m:
+                stage_name_found = stage_m.group(1).strip()
+            elif _PIPELINE_STAGE_RE.search(trimmed):
+                m2 = _PIPELINE_STAGE_RE.search(trimmed)
+                stage_name_found = m2.group(1).strip() if m2 else None
+            elif _PIPELINE_STAGE_SENTINEL_RE.search(trimmed):
+                # Two-line form: peek ahead for the name line and mark it as consumed
+                for j in range(line_idx + 1, min(line_idx + 4, len(lines))):
+                    nxt = lines[j].strip()
+                    if not nxt:
+                        continue
+                    nm = _PIPELINE_STAGE_NAME_RE.search(nxt)
+                    if nm:
+                        stage_name_found = (nm.group(1) or nm.group(2) or "").strip()
+                        _skip_line = j  # don't process this line again as a stage marker
+                    break
+
+            if stage_name_found:
                 if current_stage:
                     current_stage.end_line = line_idx - 1
                     stages.append(current_stage)
                 current_stage = Stage(
-                    name=stage_m.group(1).strip(),
+                    name=stage_name_found,
                     start_line=line_idx,
                     end_line=line_idx,
                     timestamp=ts,
@@ -970,13 +1012,20 @@ def build_synthesis_prompt(
     result: ParseResult,
     global_summary: str,
     max_chars_per_segment: int = 800,
+    focus: str = "auto",
 ) -> tuple[str, str]:
     """Build (system, user) prompt for the final synthesis pass."""
-    system = """You are an expert Jenkins CI/CD performance engineer.
+    focus_instruction = {
+        "errors":      "Focus primarily on error root causes and the failure chain across segments.",
+        "performance": "Focus primarily on performance bottlenecks and optimisation opportunities.",
+        "full":        "Cover both errors and performance with equal weight.",
+    }.get(focus, "Balance error diagnosis and performance analysis based on what the segments reveal.")
+
+    system = f"""You are an expert Jenkins CI/CD performance engineer with deep knowledge of Groovy and Jenkins Shared Libraries.
 You have received segment-by-segment analyses of a large build log.
 Synthesize them into a single, unified, executive-quality report.
-Avoid repeating raw data already in the segment reports -- focus on cross-segment patterns,
-the most critical bottlenecks overall, and a clear prioritized action plan.
+{focus_instruction}
+Avoid repeating raw data -- focus on cross-segment patterns, critical findings, and a clear action plan.
 Format in markdown with clear sections."""
 
     # Truncate each segment to keep total prompt size manageable.
@@ -1018,3 +1067,212 @@ Provide:
 7. **Stability Risks** -- High-variance methods or patterns suggesting flakiness
 """
     return system, user
+
+
+# ---------------------------------------------------------------------------
+# Focused prompt builders -- used when user selects a specific analysis lens
+# ---------------------------------------------------------------------------
+
+def build_focused_prompt(
+    result: "ParseResult",
+    raw_log: str,
+    focus: str,
+    source_context: str = "",
+) -> tuple[str, str]:
+    """
+    Route to the right system+user prompt based on focus.
+    focus values:
+      "auto"          -- pick best based on what was detected
+      "errors"        -- error root cause only
+      "performance"   -- bottleneck analysis only
+      "full"          -- errors + performance
+      "stage:<name>"  -- deep-dive one stage
+      "custom:<text>" -- answer a specific question
+    """
+    focus = focus.strip()
+
+    if focus.startswith("custom:"):
+        return _build_custom_prompt(result, raw_log, focus[7:].strip(), source_context)
+
+    if focus.startswith("stage:"):
+        return _build_stage_prompt(result, raw_log, focus[6:].strip(), source_context)
+
+    if focus == "errors" or (focus == "auto" and result.build_failed and result.errors):
+        return build_failure_analysis_prompt(result, raw_log, source_context)
+
+    if focus == "performance":
+        return build_analysis_prompt(result, raw_log[:4000], source_context)
+
+    if focus == "full" or focus == "auto":
+        # Auto: use failure prompt if errors exist, perf prompt otherwise
+        if result.errors:
+            return _build_full_prompt(result, raw_log, source_context)
+        return build_analysis_prompt(result, raw_log[:4000], source_context)
+
+    # Fallback
+    return build_analysis_prompt(result, raw_log[:4000], source_context)
+
+
+def _build_full_prompt(
+    result: "ParseResult",
+    raw_log: str,
+    source_context: str = "",
+) -> tuple[str, str]:
+    """Combined errors + performance prompt."""
+    system = """You are an expert Jenkins CI/CD engineer with deep knowledge of Groovy, Jenkins Shared Libraries, Maven, Gradle, and Docker.
+You are performing a complete build diagnosis covering both failures AND performance.
+Correlate errors with slow methods — a timeout or retry loop may be both an error and a performance problem.
+If Groovy source code is provided, map stack frames to specific lines.
+Format in markdown with clear sections."""
+
+    err_sys, err_usr = build_failure_analysis_prompt(result, raw_log, source_context)
+    perf_sys, perf_usr = build_analysis_prompt(result, raw_log[:3000], source_context)
+
+    user = f"""Perform a complete diagnosis of this Jenkins build covering both errors and performance.
+
+{err_usr}
+
+---
+
+## Performance Context
+{perf_usr}
+
+Please provide:
+1. **Build Verdict** -- one sentence: did it fail, why, and is it also slow?
+2. **Root Cause Chain** -- failure trace if applicable
+3. **Top Performance Issues** -- top 3 slow spots and why
+4. **Combined Fix Plan** -- ordered action items covering both stability and speed
+5. **Are the errors and slowness related?** -- explicit answer
+"""
+    return system, user
+
+
+def _build_stage_prompt(
+    result: "ParseResult",
+    raw_log: str,
+    stage_name: str,
+    source_context: str = "",
+) -> tuple[str, str]:
+    """Deep-dive a single stage."""
+    # Find the stage
+    stage = next((s for s in result.stages if s.name == stage_name), None)
+    if not stage:
+        # Fuzzy match
+        stage = next((s for s in result.stages
+                      if stage_name.lower() in s.name.lower()), None)
+
+    system = """You are an expert Jenkins CI/CD engineer.
+You are performing a targeted deep-dive on a single pipeline stage.
+Be precise and specific — only discuss what happened in this stage.
+If Groovy source is provided, reference specific lines."""
+
+    if not stage:
+        return system, f"Stage '{stage_name}' not found. Available stages: {[s.name for s in result.stages]}"
+
+    # Extract log lines for this stage
+    log_lines = raw_log.splitlines()
+    stage_lines = log_lines[stage.start_line:stage.end_line + 1]
+    stage_excerpt = "\n".join(stage_lines)[:3000]
+
+    # Stage-specific timing
+    methods = stage.methods or []
+    timing_table = "\n".join(
+        f"  {m['name']}: {m.get('elapsed','?')}s"
+        for m in sorted(methods, key=lambda x: x.get('elapsed') or 0, reverse=True)[:20]
+    ) or "  (no timing data)"
+
+    # Stage-specific errors
+    stage_errors = [e for e in result.errors if e.stage == stage_name]
+    error_text = ""
+    if stage_errors:
+        for e in stage_errors[:5]:
+            error_text += f"\n- **{e.error_type}**: {e.message}"
+            if e.failed_method:
+                error_text += f" (in `{e.failed_method}`)"
+
+    source_section = ("\n## Source Code\n" + source_context) if source_context else ""
+
+    user = f"""Deep-dive analysis of stage: **{stage_name}**
+
+## Stage Stats
+- Total time: {stage.total_time:.2f}s
+- Methods called: {len(methods)}
+- Errors: {len(stage_errors)}
+
+## Method Timings (slowest first)
+{timing_table}
+
+## Errors in this Stage{error_text or chr(10) + "  None detected"}
+{source_section}
+## Stage Log ({len(stage_lines)} lines)
+```
+{stage_excerpt}
+```
+
+Please provide:
+1. **Stage Health** -- one sentence verdict
+2. **What this stage does** -- brief description based on methods called
+3. **Bottlenecks** -- slowest methods and likely root cause
+4. **Errors** -- if any, exact cause and fix
+5. **Optimisation** -- specific change to speed up or stabilise this stage
+"""
+    return system, user
+
+
+def _build_custom_prompt(
+    result: "ParseResult",
+    raw_log: str,
+    question: str,
+    source_context: str = "",
+) -> tuple[str, str]:
+    """Answer a specific user question about the build log."""
+    system = """You are an expert Jenkins CI/CD engineer and DevOps consultant.
+Answer the user's specific question about their build log precisely and concisely.
+Back every claim with evidence from the log, timing data, or source code provided.
+If the question cannot be answered from the available data, say so clearly."""
+
+    timing_summary = "\n".join(
+        f"  {s.name}: {s.total}s (avg {s.avg}s, {s.calls} calls)"
+        + (" [SLOW]" if s.is_slow else "")
+        for s in result.timing_stats[:15]
+    ) or "  (none)"
+
+    stages_summary = "\n".join(
+        f"  {s.name}: {s.total_time:.1f}s, {len(s.methods)} methods"
+        for s in result.stages
+    ) or "  (none)"
+
+    error_summary = "\n".join(
+        f"  [{e.error_type}] {e.message[:120]}"
+        for e in result.errors[:5]
+    ) or "  None"
+
+    log_excerpt = raw_log[:3000]
+    source_section = ("\n## Source Code\n" + source_context) if source_context else ""
+
+    user = f"""## User Question
+{question}
+
+## Build Context
+- Total duration: {result.total_duration}s across {len(result.stages)} stages
+- Build failed: {'YES' if result.build_failed else 'no'}
+- Log lines: {result.log_lines}
+
+## Stages
+{stages_summary}
+
+## Method Timings
+{timing_summary}
+
+## Errors
+{error_summary}
+{source_section}
+## Log Excerpt
+```
+{log_excerpt}
+```
+
+Answer the user's question above using the build data provided.
+"""
+    return system, user
+

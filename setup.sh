@@ -35,31 +35,37 @@ echo   "  ========================================"
 echo   ""
 echo   "  Choose a run mode:"
 echo   ""
-echo   "  [1]  Cloud AI only  (Anthropic / private, no local model)"
+echo   "  --- Build from source ------------------------------------------"
+echo   "  [1]  Cloud AI only        (Anthropic / private, no local model)"
 echo   "       Any machine. Requires ANTHROPIC_API_KEY in .env."
 echo   ""
-echo   "  [2]  Local Ollama, CPU  (Mac, Linux, any machine)"
-echo   "       Runs Ollama locally on CPU. Slower, fully offline."
+echo   "  [2]  Dockerized Ollama, CPU  (Mac, Linux, any machine)"
+echo   "       Runs Ollama in Docker on CPU. First run pulls model."
 echo   ""
-echo   "  [3]  Local Ollama, GPU  (Linux / Windows NVIDIA GPU)"
+echo   "  [3]  Host Ollama  (Mac native -- Ollama runs on your Mac, not Docker)"
+echo   "       Fastest setup on Mac. No Docker Ollama container."
+echo   "       Requires: OLLAMA_HOST=0.0.0.0 ollama serve"
+echo   ""
+echo   "  [4]  Dockerized Ollama, GPU  (Linux / Windows NVIDIA only)"
 echo   "       Fast local inference with NVIDIA GPU."
 echo   ""
-echo   "  [4]  ISOLATED, CPU  (air-gapped / no internet)"
+echo   "  [5]  ISOLATED, CPU  (air-gapped / no internet)"
 echo   "       Ollama CPU + Docker internal network + ISOLATED_MODE=true."
-echo   "       Zero outbound internet at both app and network layer."
 echo   ""
-echo   "  [5]  ISOLATED, GPU  (air-gapped + NVIDIA GPU)"
+echo   "  [6]  ISOLATED, GPU  (air-gapped + NVIDIA GPU)"
 echo   "       Ollama GPU + Docker internal network + ISOLATED_MODE=true."
 echo   ""
 echo   "  --- Pre-built images (pull from registry, no build required) ---"
-echo   "  [6]  Pre-built, cloud AI     (IMAGE_REGISTRY in .env required)"
-echo   "  [7]  Pre-built, Ollama CPU   (recommended for Mac -- pull only)"
-echo   "  [8]  Pre-built, isolated     (private-only mode + Ollama CPU)"
+echo   "  [7]  Pre-built, cloud AI        (IMAGE_REGISTRY in .env required)"
+echo   "  [8]  Pre-built, Dockerized Ollama CPU"
+echo   "  [9]  Pre-built, host Ollama     (Mac native -- recommended)"
+echo   "  [10] Pre-built, isolated        (private-only mode + Ollama CPU)"
 echo   ""
-echo   "  [9]  Stop all containers"
-echo   "  [10] Show container status"
-echo   "  [11] Tail logs"
-echo   "  [12] Open app in browser"
+echo   "  --- Utilities ---------------------------------------------------"
+echo   "  [11] Stop all containers"
+echo   "  [12] Show container status"
+echo   "  [13] Tail logs"
+echo   "  [14] Open app in browser"
 echo   "  [q]  Quit"
 echo   ""
 read -p "  Enter choice: " CHOICE
@@ -72,14 +78,34 @@ case "$CHOICE" in
         echo ""; ok "Open: http://localhost:$FP"
         ;;
     2)
-        header "Starting local Ollama (CPU)..."
+        header "Starting Dockerized Ollama (CPU)..."
         warn "First run downloads the model -- may take several minutes."
-        info "Tip: set OLLAMA_MODEL=phi3:mini in .env for faster CPU inference on Mac."
+        info "Tip: set OLLAMA_MODEL=phi3:mini in .env for faster CPU inference."
         make up-ollama
         FP=$(get_port FRONTEND_PORT 3000)
         echo ""; ok "Open: http://localhost:$FP"
         ;;
     3)
+        header "Starting with host-native Ollama (Mac recommended)..."
+        info "Using Ollama running on your Mac -- no Docker Ollama container."
+        echo ""
+        # Check if Ollama is running on host
+        OLLAMA_PORT_VAL=$(get_port OLLAMA_PORT 11434)
+        if curl -sf --max-time 3 http://localhost:$OLLAMA_PORT_VAL/api/tags > /dev/null 2>&1; then
+            ok "Host Ollama is running on port $OLLAMA_PORT_VAL"
+            MODELS=$(curl -sf http://localhost:$OLLAMA_PORT_VAL/api/tags 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(', '.join(m['name'] for m in d.get('models',[])))" 2>/dev/null || echo "unknown")
+            info "Available models: $MODELS"
+        else
+            warn "Ollama not detected on port $OLLAMA_PORT_VAL"
+            warn "Start it with: OLLAMA_HOST=0.0.0.0 ollama serve"
+            warn "Continuing anyway -- configure the URL in the Config tab if needed."
+        fi
+        echo ""
+        make up-host-ollama
+        FP=$(get_port FRONTEND_PORT 3000)
+        echo ""; ok "Open: http://localhost:$FP"
+        ;;
+    4)
         header "Starting Ollama GPU mode (NVIDIA required)..."
         if command -v nvidia-smi &>/dev/null; then
             GPU=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
@@ -91,7 +117,7 @@ case "$CHOICE" in
         FP=$(get_port FRONTEND_PORT 3000)
         echo ""; ok "Open: http://localhost:$FP"
         ;;
-    4)
+    5)
         header "Starting ISOLATED mode (CPU, no internet)..."
         warn "Internet access blocked at both application and Docker network layer."
         info "AI provider will be forced to ollama. Anthropic/public GitHub blocked."
@@ -99,14 +125,14 @@ case "$CHOICE" in
         FP=$(get_port FRONTEND_PORT 3000)
         echo ""; ok "Open: http://localhost:$FP"
         ;;
-    5)
+    6)
         header "Starting ISOLATED mode (GPU, no internet)..."
         warn "Internet access blocked at both application and Docker network layer."
         make up-gpu-isolated
         FP=$(get_port FRONTEND_PORT 3000)
         echo ""; ok "Open: http://localhost:$FP"
         ;;
-    6)
+    7)
         header "Starting pre-built stack (cloud AI)..."
         info "Pulls images from IMAGE_REGISTRY in .env -- no build required."
         REG=$(get_port IMAGE_REGISTRY "")
@@ -118,10 +144,9 @@ case "$CHOICE" in
         FP=$(get_port FRONTEND_PORT 3000)
         echo ""; ok "Open: http://localhost:$FP"
         ;;
-    7)
-        header "Starting pre-built stack (Ollama CPU)..."
+    8)
+        header "Starting pre-built stack (Dockerized Ollama CPU)..."
         info "Pulls images from IMAGE_REGISTRY in .env -- no build required."
-        info "Recommended for Mac: no build tools needed, runs Ollama locally."
         REG=$(get_port IMAGE_REGISTRY "")
         if [ -z "$REG" ]; then
             warn "IMAGE_REGISTRY is not set in .env -- set it before running this mode."
@@ -132,7 +157,25 @@ case "$CHOICE" in
         FP=$(get_port FRONTEND_PORT 3000)
         echo ""; ok "Open: http://localhost:$FP"
         ;;
-    8)
+    9)
+        header "Starting pre-built stack (host-native Ollama -- Mac recommended)..."
+        info "Pulls images from IMAGE_REGISTRY in .env -- no build, no Docker Ollama."
+        REG=$(get_port IMAGE_REGISTRY "")
+        if [ -z "$REG" ]; then
+            warn "IMAGE_REGISTRY is not set in .env -- set it before running this mode."
+            exit 1
+        fi
+        OLLAMA_PORT_VAL=$(get_port OLLAMA_PORT 11434)
+        if curl -sf --max-time 3 http://localhost:$OLLAMA_PORT_VAL/api/tags > /dev/null 2>&1; then
+            ok "Host Ollama is running"
+        else
+            warn "Ollama not detected -- start with: OLLAMA_HOST=0.0.0.0 ollama serve"
+        fi
+        make up-prebuilt-host-ollama
+        FP=$(get_port FRONTEND_PORT 3000)
+        echo ""; ok "Open: http://localhost:$FP"
+        ;;
+    10)
         header "Starting pre-built isolated stack (Ollama CPU, private-only)..."
         info "Pulls images from IMAGE_REGISTRY in .env -- no build required."
         info "Public cloud (Anthropic + github.com) is blocked."
@@ -145,22 +188,23 @@ case "$CHOICE" in
         FP=$(get_port FRONTEND_PORT 3000)
         echo ""; ok "Open: http://localhost:$FP"
         ;;
-    9)
+    11)
         header "Stopping all containers..."
         docker compose down
         docker compose --profile ollama down 2>/dev/null || true
         make down-isolated 2>/dev/null || true
+        make down-host-ollama 2>/dev/null || true
         ok "Done."
         ;;
-    10)
+    12)
         header "Container status"
         docker compose ps
         ;;
-    11)
+    13)
         header "Tailing logs (Ctrl+C to stop)..."
         docker compose logs -f
         ;;
-    12)
+    14)
         FP=$(get_port FRONTEND_PORT 3000)
         URL="http://localhost:$FP"
         header "Opening $URL"

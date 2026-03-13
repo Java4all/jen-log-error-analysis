@@ -1,0 +1,62 @@
+# -----------------------------------------------------------------------------
+# Host-native Ollama overlay
+#
+# Use this when Ollama is already running on your Mac (or Linux host) and you
+# do NOT want Docker to manage an Ollama container.
+#
+# What this does
+# --------------
+#   - Overrides OLLAMA_BASE_URL so the API container reaches Ollama on your
+#     host via Docker's built-in DNS name: host.docker.internal
+#   - Sets AI_PROVIDER=ollama so the backend uses it automatically
+#   - No ollama service is started — your host Ollama is used directly
+#
+# Prerequisites
+# -------------
+#   1. Ollama installed and running on your Mac/Linux host:
+#        OLLAMA_HOST=0.0.0.0 ollama serve
+#      (the default 127.0.0.1 binding is NOT reachable from inside Docker)
+#
+#   2. At least one model pulled on the host:
+#        ollama pull codellama:13b
+#      Or a lighter model for faster response:
+#        ollama pull phi3:mini
+#        ollama pull llama3.2:3b
+#
+#   3. Set OLLAMA_MODEL in .env to match what you have pulled.
+#
+# Usage
+# -----
+#   Build from source:
+#     docker compose -f docker-compose.yml -f docker-compose.host-ollama.yml up --build -d
+#
+#   Pre-built images (no build):
+#     docker compose -f docker-compose.yml \
+#                    -f docker-compose.prebuilt.yml \
+#                    -f docker-compose.host-ollama.yml up -d
+#
+#   Or use the shortcuts in setup.sh:
+#     bash setup.sh  ->  option [3] Host Ollama (Mac native)
+#                        option [9] Pre-built, host Ollama
+#
+#   Or with make:
+#     make up-host-ollama
+#     make up-prebuilt-host-ollama
+#
+# Verify connectivity from inside Docker before starting the stack:
+#   docker run --rm --add-host=host.docker.internal:host-gateway \
+#     curlimages/curl curl http://host.docker.internal:11434/api/tags
+# -----------------------------------------------------------------------------
+
+name: jenkins-analyzer
+
+services:
+  api:
+    environment:
+      - AI_PROVIDER=ollama
+      - OLLAMA_BASE_URL=http://host.docker.internal:${OLLAMA_PORT:-11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-codellama:13b}
+    # host.docker.internal is built into Docker Desktop on Mac/Windows.
+    # On Linux it requires the extra_hosts entry below (already in base file).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
