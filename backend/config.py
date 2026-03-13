@@ -24,6 +24,7 @@ class OllamaConfig(BaseModel):
     base_url: str = "http://localhost:11434"
     model: str = "codellama:13b"
     timeout: int = 120
+    synthesis_timeout: int = 600  # longer timeout for synthesis (larger prompt)
 
 
 class PrivateAIConfig(BaseModel):

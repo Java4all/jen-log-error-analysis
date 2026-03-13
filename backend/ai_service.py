@@ -5,7 +5,7 @@ Supports: Anthropic Claude, Ollama (local GPU), private OpenAI-compatible endpoi
 from __future__ import annotations
 import json
 import logging
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 import httpx
 
@@ -21,7 +21,7 @@ class AIServiceError(Exception):
 # -- Base -----------------------------------------------------------------------
 
 class BaseAIProvider:
-    async def complete(self, system: str, user: str) -> str:
+    async def complete(self, system: str, user: str, timeout: Optional[int] = None) -> str:
         raise NotImplementedError
 
     async def stream(self, system: str, user: str) -> AsyncIterator[str]:
@@ -37,8 +37,8 @@ class AnthropicProvider(BaseAIProvider):
         if not self.cfg.api_key:
             raise AIServiceError("Anthropic API key is not configured.")
 
-    async def complete(self, system: str, user: str) -> str:
-        async with httpx.AsyncClient(timeout=120) as client:
+    async def complete(self, system: str, user: str, timeout: Optional[int] = None) -> str:
+        async with httpx.AsyncClient(timeout=timeout or 120) as client:
             resp = await client.post(
                 "https://api.anthropic.com/v1/messages",
                 headers={
@@ -109,10 +109,10 @@ class OllamaProvider(BaseAIProvider):
             opts["num_gpu"] = 0
         return opts
 
-    async def complete(self, system: str, user: str) -> str:
+    async def complete(self, system: str, user: str, timeout: Optional[int] = None) -> str:
         try:
             async with httpx.AsyncClient(
-                base_url=self.cfg.base_url, timeout=self.cfg.timeout
+                base_url=self.cfg.base_url, timeout=timeout or self.cfg.timeout
             ) as client:
                 resp = await client.post(
                     "/api/chat",
@@ -266,7 +266,7 @@ class PrivateProvider(BaseAIProvider):
             body["n_gpu_layers"] = self.gpu_layers
         return body
 
-    async def complete(self, system: str, user: str) -> str:
+    async def complete(self, system: str, user: str, timeout: Optional[int] = None) -> str:
         async with httpx.AsyncClient(
             timeout=self.cfg.timeout,
             verify=self.cfg.verify_ssl,
@@ -319,5 +319,5 @@ def get_ai_provider(override_provider: str | None = None) -> BaseAIProvider:
         raise AIServiceError(f"Unknown AI provider: '{provider}'. Valid: anthropic, ollama, private")
 
 
-async def ai_complete(system: str, user: str, provider: str | None = None) -> str:
-    return await get_ai_provider(provider).complete(system, user)
+async def ai_complete(system: str, user: str, provider: str | None = None, timeout: Optional[int] = None) -> str:
+    return await get_ai_provider(provider).complete(system, user, timeout=timeout)

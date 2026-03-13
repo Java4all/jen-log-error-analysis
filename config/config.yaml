@@ -19,7 +19,8 @@ ai:
   ollama:
     base_url: "http://localhost:11434"
     model: "codellama:13b"
-    timeout: 120
+    timeout: 120           # per-batch call timeout (seconds)
+    synthesis_timeout: 600 # synthesis call timeout -- larger prompt needs more time
 
   # Private / enterprise OpenAI-compatible endpoint
   private:

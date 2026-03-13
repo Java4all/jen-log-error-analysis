@@ -967,6 +967,7 @@ def build_synthesis_prompt(
     batch_reports: list[str],
     result: ParseResult,
     global_summary: str,
+    max_chars_per_segment: int = 800,
 ) -> tuple[str, str]:
     """Build (system, user) prompt for the final synthesis pass."""
     system = """You are an expert Jenkins CI/CD performance engineer.
@@ -976,8 +977,16 @@ Avoid repeating raw data already in the segment reports -- focus on cross-segmen
 the most critical bottlenecks overall, and a clear prioritized action plan.
 Format in markdown with clear sections."""
 
+    # Truncate each segment to keep total prompt size manageable.
+    # A full segment report can be 1000+ chars; with 8 batches that's 8k+ chars
+    # which causes timeouts on small local models.
+    def truncate(text: str, limit: int) -> str:
+        if len(text) <= limit:
+            return text
+        return text[:limit] + f"\n... [truncated, {len(text)-limit} chars omitted]"
+
     segments_text = "\n\n---\n\n".join(
-        f"### Segment {i + 1} Analysis\n{r}"
+        f"### Segment {i + 1}\n{truncate(r, max_chars_per_segment)}"
         for i, r in enumerate(batch_reports)
     )
 
@@ -1000,9 +1009,7 @@ Format in markdown with clear sections."""
 Provide:
 1. **Executive Summary** -- 3-4 sentences on overall pipeline health
 2. **Critical Bottlenecks** -- Top 5 issues across all segments, ranked by impact
-3. **Cross-Segment Patterns** -- Issues that appear in multiple segments (systemic problems)
-4. **Stage Health Overview** -- Table or list: stage name, time, verdict (OK/SLOW/ERROR)
-5. **Optimization Roadmap** -- Numbered action items, prioritized by ROI
-6. **Stability Risks** -- Methods with high variance (flakiness signals)
+3. **Cross-Segment Patterns** -- Systemic issues appearing in multiple segments
+4. **Optimization Roadmap** -- Numbered action items, prioritized by ROI
 """
     return system, user

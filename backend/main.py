@@ -527,12 +527,16 @@ async def analyze_batch(req: AnalyzeRequest):
                 final_report = batch_reports[0]
             else:
                 global_summary = batches[0].global_summary if batches else ""
+                # build_synthesis_prompt truncates segments internally (800 chars each)
                 sys_s, usr_s = build_synthesis_prompt(batch_reports, result, global_summary)
+                synthesis_timeout = cfg.ai.ollama.synthesis_timeout if cfg.ai.provider == "ollama" else 600
+                logger.info(f"Synthesis: {len(batch_reports)} segments, prompt={len(usr_s)} chars, timeout={synthesis_timeout}s")
                 try:
-                    final_report = await provider.complete(sys_s, usr_s)
+                    final_report = await provider.complete(sys_s, usr_s, timeout=synthesis_timeout)
                 except Exception as e:
-                    final_report = "\n\n---\n\n".join(batch_reports)
                     logger.error(f"Synthesis failed: {e}")
+                    # Fall back to concatenating reports with a header
+                    final_report = "## Build Analysis (segments)\n\n" + "\n\n---\n\n".join(batch_reports)
 
             yield sse({"type": "done", "final_report": final_report, "source_matched": source_matched})
 
