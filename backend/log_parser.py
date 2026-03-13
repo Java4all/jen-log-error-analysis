@@ -1069,8 +1069,226 @@ Provide:
     return system, user
 
 
+
+
 # ---------------------------------------------------------------------------
-# Focused prompt builders -- used when user selects a specific analysis lens
+# Focus-aware log extractor
+#
+# Uses the already-parsed index (line numbers, stage boundaries, error
+# locations) to pull ONLY the lines that are relevant to the requested focus.
+# The AI never receives lines it doesn't need.
+# ---------------------------------------------------------------------------
+
+def extract_for_focus(
+    result: "ParseResult",
+    raw_log: str,
+    focus: str,
+    context_lines: int = 30,
+    max_chars: int = 5000,
+) -> str:
+    """
+    Return a focused excerpt of raw_log using the parsed index.
+
+    Instead of sending the whole log (or a dumb head/tail slice), we use
+    what the parser already knows to collect only the signal lines:
+
+      errors      → windows around every error line + full stack traces
+      performance → lines containing timing values + slow-method call sites
+      stage:<n>   → exact start_line..end_line slice for that stage
+      custom:<q>  → lines matching keywords extracted from the question
+      full/auto   → errors excerpt + slow method sites (both, compact)
+    """
+    lines = raw_log.splitlines()
+
+    if focus == "performance":
+        return _extract_performance(result, lines, context_lines, max_chars)
+
+    if focus.startswith("stage:"):
+        return _extract_stage(result, lines, focus[6:].strip(), max_chars)
+
+    if focus.startswith("custom:"):
+        return _extract_custom(lines, focus[7:].strip(), context_lines, max_chars)
+
+    if focus == "errors" or (focus == "auto" and result.errors):
+        return _extract_errors(result, lines, context_lines, max_chars)
+
+    # full / auto with no errors → combine both
+    err_part  = _extract_errors(result, lines, context_lines, max_chars // 2)
+    perf_part = _extract_performance(result, lines, context_lines // 2, max_chars // 2)
+    combined  = err_part + "\n\n--- Performance signal lines ---\n\n" + perf_part
+    return combined[:max_chars]
+
+
+def _collect_windows(lines: list[str], centers: list[int], before: int, after: int) -> str:
+    """
+    Collect non-overlapping windows around center line numbers.
+    Merges adjacent/overlapping windows. Returns them as a single string
+    with a '--- line N ---' separator between each window.
+    """
+    if not centers:
+        return ""
+
+    # Build sorted unique ranges and merge overlaps
+    ranges = []
+    for c in sorted(set(centers)):
+        s = max(0, c - before)
+        e = min(len(lines) - 1, c + after)
+        ranges.append((s, e))
+
+    merged = [ranges[0]]
+    for s, e in ranges[1:]:
+        ps, pe = merged[-1]
+        if s <= pe + 1:            # overlapping or adjacent — merge
+            merged[-1] = (ps, max(pe, e))
+        else:
+            merged.append((s, e))
+
+    parts = []
+    for s, e in merged:
+        header = f"--- lines {s}–{e} ---"
+        block  = "\n".join(lines[s:e + 1])
+        parts.append(f"{header}\n{block}")
+
+    return "\n\n".join(parts)
+
+
+def _extract_errors(
+    result: "ParseResult",
+    lines: list[str],
+    context: int,
+    max_chars: int,
+) -> str:
+    """
+    Collect windows around every detected error.
+    Also appends the already-captured stack traces so they are never cut off.
+    """
+    if not result.errors:
+        # No parsed errors — fall back to last 200 lines (failure usually at end)
+        tail = lines[-200:]
+        return "\n".join(tail)[:max_chars]
+
+    centers = [e.line_number for e in result.errors]
+    excerpt = _collect_windows(lines, centers, before=context, after=context * 2)
+
+    # Append any stack trace lines that extend beyond our windows
+    extra_traces = []
+    for err in result.errors:
+        if err.stack_trace:
+            extra_traces.append(f"\n-- Stack trace for {err.error_type} at line {err.line_number} --")
+            extra_traces.extend(err.stack_trace[:30])
+
+    if extra_traces:
+        excerpt = excerpt + "\n" + "\n".join(extra_traces)
+
+    return excerpt[:max_chars]
+
+
+# Patterns that indicate a line carries timing information
+_TIMING_LINE_RE = re.compile(
+    r"time-elapsed-seconds|Time elapsed|Finished Stage|BUILD (?:SUCCESSFUL|FAILED) in"
+    r"|total=|elapsed=|duration=|took\s+[\d.]+\s*s",
+    re.IGNORECASE,
+)
+
+
+def _extract_performance(
+    result: "ParseResult",
+    lines: list[str],
+    context: int,
+    max_chars: int,
+) -> str:
+    """
+    Collect:
+      1. Lines that contain timing values (already parsed by the engine)
+      2. Small context windows around slow-method call sites in the call tree
+    """
+    centers: list[int] = []
+
+    # 1. Scan for timing-bearing lines (fast single pass)
+    for i, line in enumerate(lines):
+        if _TIMING_LINE_RE.search(line):
+            centers.append(i)
+
+    # 2. Slow method call sites from the call tree
+    slow_names = {s.name for s in result.timing_stats if s.is_slow}
+
+    def _walk(nodes: list) -> None:
+        for node in nodes:
+            if node.name in slow_names and node.line_number:
+                centers.append(node.line_number)
+            _walk(node.children)
+
+    _walk(result.call_tree)
+
+    if not centers:
+        # No timing lines found — return stage boundary lines as proxy
+        for stage in result.stages:
+            centers.extend([stage.start_line, stage.end_line])
+
+    excerpt = _collect_windows(lines, centers, before=2, after=4)
+    return excerpt[:max_chars]
+
+
+def _extract_stage(
+    result: "ParseResult",
+    lines: list[str],
+    stage_name: str,
+    max_chars: int,
+) -> str:
+    """Exact start..end slice for a specific stage."""
+    stage = next((s for s in result.stages if s.name == stage_name), None)
+    if not stage:
+        stage = next(
+            (s for s in result.stages if stage_name.lower() in s.name.lower()), None
+        )
+    if not stage:
+        return f"Stage '{stage_name}' not found. Available: {[s.name for s in result.stages]}"
+
+    stage_lines = lines[stage.start_line : stage.end_line + 1]
+    return "\n".join(stage_lines)[:max_chars]
+
+
+def _extract_custom(
+    lines: list[str],
+    question: str,
+    context: int,
+    max_chars: int,
+) -> str:
+    """
+    Extract lines relevant to a free-text question.
+    Strips stop-words, then finds lines that contain any keyword.
+    Falls back to first 100 + last 100 lines if no matches.
+    """
+    _STOP = {
+        "the","a","an","is","are","was","were","it","its","in","on","at","to",
+        "for","of","and","or","with","my","me","i","what","why","how","when",
+        "can","do","does","this","that","their","they","be","has","have","had",
+    }
+    words = re.findall(r"[a-zA-Z_]\w*", question.lower())
+    keywords = [w for w in words if w not in _STOP and len(w) > 2]
+
+    if not keywords:
+        # No usable keywords — return head + tail
+        head = lines[:100]
+        tail = lines[-100:]
+        return "\n".join(head + ["\n--- ... ---\n"] + tail)[:max_chars]
+
+    kw_pattern = re.compile("|".join(re.escape(k) for k in keywords), re.IGNORECASE)
+    centers = [i for i, line in enumerate(lines) if kw_pattern.search(line)]
+
+    if not centers:
+        head = lines[:100]
+        tail = lines[-100:]
+        return "\n".join(head + ["\n--- ... ---\n"] + tail)[:max_chars]
+
+    return _collect_windows(lines, centers, before=context // 3, after=context // 3)[:max_chars]
+
+# ---------------------------------------------------------------------------
+# Focused prompt builders — strict data isolation per lens
+#
+# Core principle: don't tell the model to ignore data — just don't send it.
+# Each function feeds ONLY the data relevant to its lens. The model cannot
+# discuss what it never received.
 # ---------------------------------------------------------------------------
 
 def build_focused_prompt(
@@ -1079,200 +1297,352 @@ def build_focused_prompt(
     focus: str,
     source_context: str = "",
 ) -> tuple[str, str]:
-    """
-    Route to the right system+user prompt based on focus.
-    focus values:
-      "auto"          -- pick best based on what was detected
-      "errors"        -- error root cause only
-      "performance"   -- bottleneck analysis only
-      "full"          -- errors + performance
-      "stage:<name>"  -- deep-dive one stage
-      "custom:<text>" -- answer a specific question
-    """
     focus = focus.strip()
-
     if focus.startswith("custom:"):
-        return _build_custom_prompt(result, raw_log, focus[7:].strip(), source_context)
-
+        return _focused_custom(result, raw_log, focus[7:].strip(), source_context)
     if focus.startswith("stage:"):
-        return _build_stage_prompt(result, raw_log, focus[6:].strip(), source_context)
-
-    if focus == "errors" or (focus == "auto" and result.build_failed and result.errors):
-        return build_failure_analysis_prompt(result, raw_log, source_context)
-
+        return _focused_stage(result, raw_log, focus[6:].strip(), source_context)
+    if focus == "errors":
+        return _focused_errors(result, raw_log, source_context)
     if focus == "performance":
-        return build_analysis_prompt(result, raw_log[:4000], source_context)
-
-    if focus == "full" or focus == "auto":
-        # Auto: use failure prompt if errors exist, perf prompt otherwise
-        if result.errors:
-            return _build_full_prompt(result, raw_log, source_context)
-        return build_analysis_prompt(result, raw_log[:4000], source_context)
-
-    # Fallback
-    return build_analysis_prompt(result, raw_log[:4000], source_context)
+        return _focused_performance(result, raw_log, source_context)
+    if focus == "full":
+        return _focused_full(result, raw_log, source_context)
+    # auto
+    if result.build_failed and result.errors:
+        return _focused_errors(result, raw_log, source_context)
+    return _focused_performance(result, raw_log, source_context)
 
 
-def _build_full_prompt(
+def _focused_errors(
     result: "ParseResult",
     raw_log: str,
     source_context: str = "",
 ) -> tuple[str, str]:
-    """Combined errors + performance prompt."""
-    system = """You are an expert Jenkins CI/CD engineer with deep knowledge of Groovy, Jenkins Shared Libraries, Maven, Gradle, and Docker.
-You are performing a complete build diagnosis covering both failures AND performance.
-Correlate errors with slow methods — a timeout or retry loop may be both an error and a performance problem.
-If Groovy source code is provided, map stack frames to specific lines.
-Format in markdown with clear sections."""
+    """
+    Error troubleshooting only.
+    Data sent: errors, stack traces, log window around failures, source of failed methods.
+    Data NOT sent: timing tables, stage durations, slow method lists — nothing performance-related.
+    """
+    system = """You are a Jenkins build failure specialist.
+Your job: help the user troubleshoot why their build failed.
+Answer like a senior engineer looking over their shoulder — direct, specific, actionable.
+Every statement must reference a concrete log line, error message, or stack frame.
+If source code is provided, map stack frames to exact lines."""
 
-    err_sys, err_usr = build_failure_analysis_prompt(result, raw_log, source_context)
-    perf_sys, perf_usr = build_analysis_prompt(result, raw_log[:3000], source_context)
+    # --- Only error data ---
+    errors_text = ""
+    for idx, err in enumerate(result.errors[:10], 1):
+        ctx = "\n".join(err.context_lines)
+        trace = "\n".join(err.stack_trace[:20]) if err.stack_trace else "(no stack trace captured)"
+        errors_text += f"""
+### Error {idx} — {err.error_type}
+Message: {err.message}
+Location: line {err.line_number}, stage: {err.stage or "unknown"}, method: {err.failed_method or "unknown"}
+Exit code: {err.exit_code if err.exit_code is not None else "n/a"}
 
-    user = f"""Perform a complete diagnosis of this Jenkins build covering both errors and performance.
+Surrounding log:
+```
+{ctx}
+```
+Stack trace:
+```
+{trace}
+```
+"""
 
-{err_usr}
+    if not errors_text:
+        errors_text = "(no errors captured by parser — check log excerpt below)"
 
----
+    failed_str = ", ".join(result.failed_methods[:15]) or "(none identified from stack traces)"
 
-## Performance Context
-{perf_usr}
+    # Use extractor: windows around every error line + full stack traces — no noise
+    log_excerpt = extract_for_focus(result, raw_log, "errors", context_lines=30, max_chars=5000)
 
-Please provide:
-1. **Build Verdict** -- one sentence: did it fail, why, and is it also slow?
-2. **Root Cause Chain** -- failure trace if applicable
-3. **Top Performance Issues** -- top 3 slow spots and why
-4. **Combined Fix Plan** -- ordered action items covering both stability and speed
-5. **Are the errors and slowness related?** -- explicit answer
+    source_section = f"\n## Source Code of Failed Methods\n{source_context}\n" if source_context else ""
+
+    user = f"""Help me troubleshoot this Jenkins build failure.
+
+Build failed: {'YES' if result.build_failed else 'errors detected'}
+Methods implicated in stack traces: {failed_str}
+
+## Detected Errors
+{errors_text}
+{source_section}
+## Relevant Log Lines (around every detected error)
+```
+{log_excerpt}
+```
+
+Tell me:
+1. **What failed** — one sentence, exact error with location
+2. **Why it failed** — the root cause (missing config, code bug, environment issue, credentials, etc.)
+3. **Fix** — exactly what to change (show code/config snippet if applicable)
+4. **How to verify the fix worked**
 """
     return system, user
 
 
-def _build_stage_prompt(
+def _focused_performance(
+    result: "ParseResult",
+    raw_log: str,
+    source_context: str = "",
+) -> tuple[str, str]:
+    """
+    Performance analysis only.
+    Data sent: timing stats, stage durations, per-stage method breakdown, source context.
+    Data NOT sent: errors, stack traces, failure messages — nothing error-related.
+    """
+    system = """You are a Jenkins build performance specialist.
+Your job: help the user understand what is making their build slow and how to speed it up.
+Answer like a senior engineer reviewing their pipeline — specific method names, measured times, concrete fixes.
+Every bottleneck claim must reference an exact method name and its measured time.
+Explain WHY each thing is slow (I/O wait, sequential steps that could parallelise, cold cache, repeated work).
+If source code is provided, point to the specific lines responsible."""
+
+    # --- Only timing/stage data --- no errors ---
+    timing_table = "\n".join(
+        f"  {s.name}: total={s.total}s  avg={s.avg}s  max={s.max}s  calls={s.calls}"
+        + ("  [SLOW]" if s.is_slow else "")
+        for s in result.timing_stats[:30]
+    ) or "  (no timing data captured)"
+
+    stages_table = "\n".join(
+        f"  {s.name}: {s.total_time:.2f}s  ({len(s.methods)} calls)"
+        for s in result.stages
+    ) or "  (no stage data)"
+
+    # Per-stage top methods — most useful for pinpointing
+    stage_breakdown = ""
+    for s in sorted(result.stages, key=lambda x: x.total_time, reverse=True)[:6]:
+        top = sorted(s.methods, key=lambda m: m.get("elapsed") or 0, reverse=True)[:6]
+        if top:
+            stage_breakdown += f"\n  {s.name} ({s.total_time:.1f}s total):\n"
+            for m in top:
+                stage_breakdown += f"    {m['name']}: {m.get('elapsed','?')}s\n"
+
+    slow_methods = [s for s in result.timing_stats if s.is_slow]
+    slow_list = "\n".join(
+        f"  {s.name}: max={s.max}s  avg={s.avg}s  p95={s.p95}s  calls={s.calls}"
+        for s in slow_methods[:15]
+    ) or "  (none flagged above 80th percentile)"
+
+    source_section = f"\n## Source Code\n{source_context}\n" if source_context else ""
+
+    # Extractor: only lines containing timing values + slow method call sites
+    log_excerpt = extract_for_focus(result, raw_log, "performance", context_lines=30, max_chars=4000)
+
+    user = f"""Help me understand what is slow in this Jenkins build and how to fix it.
+
+Total build time: {result.total_duration}s across {len(result.stages)} stages
+Slow methods flagged: {len(slow_methods)}
+
+## Stage Durations
+{stages_table}
+
+## Slowest Methods Per Stage
+{stage_breakdown}
+
+## All Method Timings (sorted by total time)
+{timing_table}
+
+## Methods Flagged as Slow (above 80th percentile)
+{slow_list}
+{source_section}
+## Timing Lines From Log
+```
+{log_excerpt}
+```
+
+Tell me:
+1. **Where the time is going** — which stage and method is the biggest problem
+2. **Top 3 bottlenecks** — method name, time, root cause, specific fix
+3. **Quick wins** — what can be parallelised or cached with low effort
+4. **Bigger optimisations** — structural changes worth the effort
+"""
+    return system, user
+
+
+def _focused_full(
+    result: "ParseResult",
+    raw_log: str,
+    source_context: str = "",
+) -> tuple[str, str]:
+    """
+    Combined: errors AND performance.
+    Sends both error data and timing data.
+    The key question: are they related?
+    """
+    system = """You are an expert Jenkins CI/CD engineer.
+The user wants a complete picture of their build: what failed AND what is slow.
+The most valuable insight you can give: are the failure and the slowness related?
+(e.g. a timeout caused by a slow method, a retry loop inflating duration, resource contention)
+Be direct and specific. Reference exact method names, log lines, and times."""
+
+    # Errors — condensed
+    errors_text = ""
+    for err in result.errors[:5]:
+        ctx = "\n".join(err.context_lines[:6])
+        errors_text += f"- **{err.error_type}** (line {err.line_number}, stage: {err.stage or 'unknown'}): {err.message}\n```\n{ctx}\n```\n"
+    errors_text = errors_text or "- No errors detected"
+
+    # Timing — condensed
+    slow_methods = [s for s in result.timing_stats if s.is_slow]
+    timing_text = "\n".join(
+        f"  {s.name}: {s.total}s total, max {s.max}s [SLOW]"
+        for s in slow_methods[:10]
+    ) or "  (no slow methods)"
+
+    stages_text = "\n".join(
+        f"  {s.name}: {s.total_time:.1f}s"
+        for s in result.stages
+    )
+
+    source_section = f"\n## Source Code\n{source_context}\n" if source_context else ""
+
+    # Extractor: errors excerpt + timing signal lines, each up to half budget
+    log_excerpt = extract_for_focus(result, raw_log, "full", context_lines=25, max_chars=5000)
+
+    user = f"""Full diagnosis: help me understand both the failure and the performance of this build.
+
+Build failed: {'YES' if result.build_failed else 'errors detected'} | Total time: {result.total_duration}s
+
+## Failures
+{errors_text}
+
+## Stage Durations
+{stages_text}
+
+## Slow Methods
+{timing_text}
+{source_section}
+## Relevant Log Lines (errors + timing signal)
+```
+{log_excerpt}
+```
+
+Tell me:
+1. **Are the failure and slowness related?** — YES or NO, with evidence from the log
+2. **Why it failed** — root cause and exact fix
+3. **Why it is slow** — top bottlenecks and fixes
+4. **What to fix first** — single prioritised action list
+"""
+    return system, user
+
+
+def _focused_stage(
     result: "ParseResult",
     raw_log: str,
     stage_name: str,
     source_context: str = "",
 ) -> tuple[str, str]:
-    """Deep-dive a single stage."""
-    # Find the stage
+    """
+    Deep-dive one stage — sends only that stage's log, methods, and errors.
+    Nothing from other stages.
+    """
     stage = next((s for s in result.stages if s.name == stage_name), None)
     if not stage:
-        # Fuzzy match
-        stage = next((s for s in result.stages
-                      if stage_name.lower() in s.name.lower()), None)
+        stage = next((s for s in result.stages if stage_name.lower() in s.name.lower()), None)
 
-    system = """You are an expert Jenkins CI/CD engineer.
-You are performing a targeted deep-dive on a single pipeline stage.
-Be precise and specific — only discuss what happened in this stage.
-If Groovy source is provided, reference specific lines."""
+    system = f"""You are an expert Jenkins CI/CD engineer.
+The user wants to understand a specific pipeline stage: "{stage_name}".
+Only discuss what happened inside this stage — its methods, timing, and errors.
+Be specific: reference method names, times, and log lines from this stage."""
 
     if not stage:
         return system, f"Stage '{stage_name}' not found. Available stages: {[s.name for s in result.stages]}"
 
-    # Extract log lines for this stage
-    log_lines = raw_log.splitlines()
-    stage_lines = log_lines[stage.start_line:stage.end_line + 1]
-    stage_excerpt = "\n".join(stage_lines)[:3000]
+    # Extractor: exact start_line..end_line slice for this stage — nothing outside it
+    stage_excerpt = extract_for_focus(result, raw_log, f"stage:{stage_name}", max_chars=4000)
 
-    # Stage-specific timing
-    methods = stage.methods or []
-    timing_table = "\n".join(
+    methods_sorted = sorted(stage.methods or [], key=lambda m: m.get("elapsed") or 0, reverse=True)
+    timing_detail = "\n".join(
         f"  {m['name']}: {m.get('elapsed','?')}s"
-        for m in sorted(methods, key=lambda x: x.get('elapsed') or 0, reverse=True)[:20]
+        for m in methods_sorted[:20]
     ) or "  (no timing data)"
 
-    # Stage-specific errors
     stage_errors = [e for e in result.errors if e.stage == stage_name]
-    error_text = ""
-    if stage_errors:
-        for e in stage_errors[:5]:
-            error_text += f"\n- **{e.error_type}**: {e.message}"
-            if e.failed_method:
-                error_text += f" (in `{e.failed_method}`)"
+    errors_detail = ""
+    for e in stage_errors[:5]:
+        ctx = "\n".join(e.context_lines[:8])
+        errors_detail += f"- **{e.error_type}**: {e.message}\n```\n{ctx}\n```\n"
+    errors_detail = errors_detail or "- None"
 
-    source_section = ("\n## Source Code\n" + source_context) if source_context else ""
+    source_section = f"\n## Source Code\n{source_context}\n" if source_context else ""
 
-    user = f"""Deep-dive analysis of stage: **{stage_name}**
+    user = f"""Analyse this pipeline stage: **{stage_name}**
 
-## Stage Stats
-- Total time: {stage.total_time:.2f}s
-- Methods called: {len(methods)}
-- Errors: {len(stage_errors)}
+Duration: {stage.total_time:.2f}s | Methods called: {len(stage.methods or [])} | Errors: {len(stage_errors)}
 
 ## Method Timings (slowest first)
-{timing_table}
+{timing_detail}
 
-## Errors in this Stage{error_text or chr(10) + "  None detected"}
+## Errors in This Stage
+{errors_detail}
 {source_section}
-## Stage Log ({len(stage_lines)} lines)
+## Stage Log
 ```
 {stage_excerpt}
 ```
 
-Please provide:
-1. **Stage Health** -- one sentence verdict
-2. **What this stage does** -- brief description based on methods called
-3. **Bottlenecks** -- slowest methods and likely root cause
-4. **Errors** -- if any, exact cause and fix
-5. **Optimisation** -- specific change to speed up or stabilise this stage
+Tell me:
+1. **Stage verdict** — passed/failed/slow, one sentence
+2. **What this stage does** — based on the methods called
+3. **Problems in this stage** — errors or slow methods, with root cause
+4. **How to fix or speed up this stage**
 """
     return system, user
 
 
-def _build_custom_prompt(
+def _focused_custom(
     result: "ParseResult",
     raw_log: str,
     question: str,
     source_context: str = "",
 ) -> tuple[str, str]:
-    """Answer a specific user question about the build log."""
-    system = """You are an expert Jenkins CI/CD engineer and DevOps consultant.
-Answer the user's specific question about their build log precisely and concisely.
-Back every claim with evidence from the log, timing data, or source code provided.
-If the question cannot be answered from the available data, say so clearly."""
+    """Answer a specific question. Send all data since we don't know what's needed."""
+    system = f"""You are an expert Jenkins CI/CD engineer.
+The user has a specific question: "{question}"
+Answer that question directly using evidence from the build data.
+Do not give a general build health report — stay on the question.
+If the data does not contain enough to answer, say so."""
 
-    timing_summary = "\n".join(
-        f"  {s.name}: {s.total}s (avg {s.avg}s, {s.calls} calls)"
-        + (" [SLOW]" if s.is_slow else "")
-        for s in result.timing_stats[:15]
+    timing_text = "\n".join(
+        f"  {s.name}: total={s.total}s avg={s.avg}s max={s.max}s calls={s.calls}"
+        + ("  [SLOW]" if s.is_slow else "")
+        for s in result.timing_stats[:20]
     ) or "  (none)"
 
-    stages_summary = "\n".join(
+    stages_text = "\n".join(
         f"  {s.name}: {s.total_time:.1f}s, {len(s.methods)} methods"
         for s in result.stages
     ) or "  (none)"
 
-    error_summary = "\n".join(
-        f"  [{e.error_type}] {e.message[:120]}"
-        for e in result.errors[:5]
+    errors_text = "\n".join(
+        f"  [{e.error_type}] line {e.line_number} (stage: {e.stage or 'unknown'}): {e.message[:120]}"
+        for e in result.errors[:8]
     ) or "  None"
 
-    log_excerpt = raw_log[:3000]
-    source_section = ("\n## Source Code\n" + source_context) if source_context else ""
+    source_section = f"\n## Source Code\n{source_context}\n" if source_context else ""
 
-    user = f"""## User Question
-{question}
+    user = f"""Question: {question}
 
-## Build Context
-- Total duration: {result.total_duration}s across {len(result.stages)} stages
-- Build failed: {'YES' if result.build_failed else 'no'}
-- Log lines: {result.log_lines}
+Build: {'FAILED' if result.build_failed else 'completed'} | Duration: {result.total_duration}s | Stages: {len(result.stages)}
 
 ## Stages
-{stages_summary}
+{stages_text}
 
 ## Method Timings
-{timing_summary}
+{timing_text}
 
 ## Errors
-{error_summary}
+{errors_text}
 {source_section}
-## Log Excerpt
+## Relevant Log Lines (matched to your question)
 ```
-{log_excerpt}
+{extract_for_focus(result, raw_log, f"custom:{question}", context_lines=20, max_chars=4000)}
 ```
 
-Answer the user's question above using the build data provided.
+Answer the question above using specific evidence from the data.
 """
     return system, user
-
