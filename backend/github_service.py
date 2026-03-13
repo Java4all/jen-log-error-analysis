@@ -155,20 +155,26 @@ PARSERS = {
 # -- GitHub API client ---------------------------------------------------------
 
 class GitHubClient:
-    API_BASE = "https://api.github.com"
+    API_BASE = "https://api.github.com"  # default; overridden for GitHub Enterprise
 
-    def __init__(self, token: str = "", timeout: int = 30):
+    def __init__(self, token: str = "", timeout: int = 30, verify_ssl: bool = True, api_url: str = ""):
         headers = {
             "Accept": "application/vnd.github.v3+json",
             "X-GitHub-Api-Version": "2022-11-28",
         }
         if token:
             headers["Authorization"] = f"Bearer {token}"
+        base = (api_url.rstrip("/") if api_url else self.API_BASE)
         self._client = httpx.AsyncClient(
-            base_url=self.API_BASE,
+            base_url=base,
             headers=headers,
             timeout=timeout,
+            verify=verify_ssl,
         )
+        if not verify_ssl:
+            import warnings
+            import urllib3  # type: ignore
+            warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
 
     async def close(self):
         await self._client.aclose()
@@ -365,7 +371,7 @@ async def fetch_full_method_bodies(
         return {}
 
     cfg = get_config()
-    client = GitHubClient(token=cfg.github.token, timeout=cfg.github.timeout)
+    client = GitHubClient(token=cfg.github.token, timeout=cfg.github.timeout, verify_ssl=cfg.github.verify_ssl, api_url=cfg.github.api_url)
 
     # Build: method_name -> MethodSignature (first match)
     sig_lookup: dict[str, "MethodSignature"] = {}
@@ -421,7 +427,7 @@ async def fetch_all_repo_contexts() -> list[RepoSourceContext]:
     if not enabled_repos:
         return []
 
-    client = GitHubClient(token=cfg.token, timeout=cfg.timeout)
+    client = GitHubClient(token=cfg.token, timeout=cfg.timeout, verify_ssl=getattr(cfg, "verify_ssl", True), api_url=getattr(cfg, "api_url", ""))
     try:
         tasks = [client.fetch_repo_context(r) for r in enabled_repos]
         return await asyncio.gather(*tasks)

@@ -261,7 +261,16 @@ function ConfigPanel({ serverConfig, onSaved }) {
   const testGH = async (repo) => {
     setTesting(t => ({...t, gh:true}));
     try {
-      const r = await apiFetch("/api/config/test-github", { method:"POST", body: JSON.stringify({ url: repo.url, branch: repo.branch, paths: repo.paths, extensions: repo.extensions }) });
+      const r = await apiFetch("/api/config/test-github", { method:"POST", body: JSON.stringify({
+        url: repo.url,
+        branch: repo.branch,
+        paths: repo.paths,
+        extensions: repo.extensions,
+        // Send live UI values so test works before saving
+        token: cfg.github.token || "",
+        api_url: cfg.github.api_url || "",
+        verify_ssl: cfg.github.verify_ssl !== false,
+      })});
       setTestResults(t => ({...t, gh: r}));
     } catch(e) { setTestResults(t => ({...t, gh: { status:"error", error:e.message }})); }
     setTesting(t => ({...t, gh:false}));
@@ -391,7 +400,7 @@ function ConfigPanel({ serverConfig, onSaved }) {
             <label style={S.label}>Repository Type</label>
             <select value={cfg.github.type} onChange={e=>set("github.type",e.target.value)} style={S.input}>
               <option value="public">Public</option>
-              <option value="private">Private (token required)</option>
+              <option value="private">Private / GitHub Enterprise</option>
             </select>
           </div>
           {cfg.github.type === "private" && (
@@ -401,6 +410,27 @@ function ConfigPanel({ serverConfig, onSaved }) {
             </div>
           )}
         </div>
+
+        {cfg.github.type === "private" && (
+          <div style={S.row}>
+            <div style={{ flex:3 }}>
+              <label style={S.label}>GitHub Enterprise API URL</label>
+              <input value={cfg.github.api_url||""} onChange={e=>set("github.api_url",e.target.value)}
+                placeholder="https://github.mycompany.com/api/v3" style={S.input} />
+              <div style={{ fontSize:11, color:"#8b949e", marginTop:3 }}>
+                Leave empty for public github.com. Enterprise: https://github.mycompany.com/api/v3
+              </div>
+            </div>
+            <div style={{ flex:1, display:"flex", flexDirection:"column", justifyContent:"center" }}>
+              <label style={S.label}>SSL Verification</label>
+              <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:12, color:"#e6edf3", cursor:"pointer" }}>
+                <input type="checkbox" checked={cfg.github.verify_ssl !== false} onChange={e=>set("github.verify_ssl",e.target.checked)} />
+                Verify SSL cert
+              </label>
+              <div style={{ fontSize:11, color:"#8b949e", marginTop:3 }}>Disable for self-signed / custom CA</div>
+            </div>
+          </div>
+        )}
 
         <div style={{ marginTop:12 }}>
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>

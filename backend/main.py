@@ -131,6 +131,10 @@ class RepoTestRequest(BaseModel):
     branch: str = "main"
     paths: list[str] = ["src/"]
     extensions: list[str] = [".groovy", ".java"]
+    # Live UI values -- if provided, override saved config for this test only
+    token: str = ""
+    api_url: str = ""
+    verify_ssl: bool = True
 
 
 class HealthResponse(BaseModel):
@@ -501,8 +505,12 @@ async def analyze_batch(req: AnalyzeRequest):
 
             provider = get_ai_provider(req.ai_provider)
             batch_reports: list[str] = []
+            rolling_context = ""  # key findings passed forward to each next batch
 
             for b in batches:
+                # Attach rolling context from all previous batches
+                b.prior_context = rolling_context
+
                 stage_names = ", ".join(s.name for s in b.stages) or f"lines {b.line_start}-{b.line_end}"
                 label = f"{stage_names} ({b.batch_index + 1}/{total})"
                 yield sse({"type": "progress", "batch": b.batch_index + 1, "total": total, "label": label})
@@ -513,12 +521,26 @@ async def analyze_batch(req: AnalyzeRequest):
                     usr_p += f"\n\n## Source Code Context\n{source_context}"
 
                 try:
-                    report = await provider.complete(sys_p, usr_p)
+                    report = await provider.complete(sys_p, usr_p, timeout=cfg.ai.ollama.timeout if cfg.ai.provider == "ollama" else None)
                 except Exception as e:
                     report = f"[Batch {b.batch_index + 1} error: {e}]"
 
                 batch_reports.append(report)
                 yield sse({"type": "batch_done", "batch": b.batch_index + 1, "partial_report": report})
+
+                # Build rolling context: extract errors and key observations from this report
+                # Keep it compact -- only the most causality-relevant lines (max 400 chars)
+                rolling_lines = []
+                for line in report.split("\n"):
+                    l = line.strip()
+                    if any(kw in l.lower() for kw in ("error", "fail", "exception", "timeout",
+                                                       "credential", "null", "not found",
+                                                       "key observation", "health", "anomal")):
+                        rolling_lines.append(l)
+                segment_label = f"Segment {b.batch_index + 1} ({stage_names})"
+                summary = "\n".join(rolling_lines[:6])[:400]
+                if summary:
+                    rolling_context += f"\n### {segment_label}\n{summary}\n"
 
             # Synthesis pass
             yield sse({"type": "synthesis", "message": f"Synthesising {total} segment reports..."})
@@ -578,17 +600,25 @@ async def get_cfg():
 
 @app.put("/api/config")
 async def update_cfg(req: ConfigUpdateRequest):
-    """Update config.yaml."""
-    config_paths = [
-        Path("config/config.yaml"),
-        Path("../config/config.yaml"),
-    ]
-    cfg_path = next((p for p in config_paths if p.exists()), config_paths[0])
+    """Update config -- writes to writable volume, read-only mount is never touched."""
+    # Always write to the writable volume
+    write_path = Path("/app/config_rw/config.yaml")
+    if not write_path.parent.exists():
+        # Fallback for local dev outside Docker
+        write_path = Path("config/config.yaml")
 
-    existing = {}
-    if cfg_path.exists():
-        with open(cfg_path) as f:
+    # Read existing saved config (from rw volume if present) as base
+    existing: dict = {}
+    if write_path.exists():
+        with open(write_path) as f:
             existing = yaml.safe_load(f) or {}
+    else:
+        # First save -- seed from the read-only defaults so we don't lose them
+        for ro_path in [Path("config/config.yaml"), Path("../config/config.yaml"), Path("/app/config/config.yaml")]:
+            if ro_path.exists():
+                with open(ro_path) as f:
+                    existing = yaml.safe_load(f) or {}
+                break
 
     def deep_merge(base: dict, override: dict) -> dict:
         result = dict(base)
@@ -601,12 +631,12 @@ async def update_cfg(req: ConfigUpdateRequest):
 
     merged = deep_merge(existing, req.config)
 
-    cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(cfg_path, "w") as f:
+    write_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(write_path, "w") as f:
         yaml.dump(merged, f, default_flow_style=False, sort_keys=False)
 
     reload_config()
-    return {"status": "saved", "path": str(cfg_path)}
+    return {"status": "saved", "path": str(write_path)}
 
 
 @app.post("/api/config/test-ai")
@@ -630,17 +660,31 @@ async def test_ai(body: dict = None):
 
 @app.post("/api/config/test-github")
 async def test_github(req: RepoTestRequest):
-    """Test GitHub repo access."""
+    """Test GitHub repo access using live UI values (not requiring a prior save)."""
     cfg = get_config()
     # Only block public github.com -- GitHub Enterprise is allowed
     if _github_is_public(cfg.github.type):
         check_private_only("connectivity test via public github.com")
-    client = GitHubClient(token=cfg.github.token, timeout=30)
+
+    # Use live values from UI if provided, fall back to saved config
+    effective_token = req.token if req.token and req.token != "***" else cfg.github.token
+    effective_api_url = req.api_url if req.api_url else cfg.github.api_url
+    effective_verify_ssl = req.verify_ssl if req.verify_ssl is not None else cfg.github.verify_ssl
+
+    client = GitHubClient(
+        token=effective_token,
+        timeout=30,
+        verify_ssl=effective_verify_ssl,
+        api_url=effective_api_url,
+    )
     try:
-        owner_repo = req.url.split("github.com/")[-1].strip("/").split("/")
-        if len(owner_repo) < 2:
-            return {"status": "error", "error": "Invalid GitHub URL"}
-        owner, repo = owner_repo[0], owner_repo[1]
+        # Parse owner/repo from URL -- works for both github.com and GitHub Enterprise
+        # e.g. https://github.mycompany.com/owner/repo or https://github.com/owner/repo
+        import re as _re
+        m = _re.search(r"https?://[^/]+/([^/]+)/([^/\s]+?)(?:\.git)?$", req.url.strip())
+        if not m:
+            return {"status": "error", "error": f"Cannot parse owner/repo from URL: {req.url}"}
+        owner, repo = m.group(1), m.group(2)
         files = await client.list_tree(owner, repo, req.branch)
         matching = [
             f["path"] for f in files

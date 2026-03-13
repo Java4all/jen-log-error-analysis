@@ -23,8 +23,8 @@ class AnthropicConfig(BaseModel):
 class OllamaConfig(BaseModel):
     base_url: str = "http://localhost:11434"
     model: str = "codellama:13b"
-    timeout: int = 120
-    synthesis_timeout: int = 600  # longer timeout for synthesis (larger prompt)
+    timeout: int = 300          # per-batch / single-call timeout (seconds)
+    synthesis_timeout: int = 600 # synthesis call timeout -- larger prompt needs more time
 
 
 class PrivateAIConfig(BaseModel):
@@ -56,6 +56,11 @@ class GitHubConfig(BaseModel):
     type: str = "public"  # public | private
     token: str = ""
     timeout: int = 30
+    verify_ssl: bool = True  # set False for self-signed / custom CA certs (GitHub Enterprise)
+    # GitHub Enterprise API base URL.
+    # Public GitHub: leave empty (uses https://api.github.com)
+    # GitHub Enterprise: set to https://github.mycompany.com/api/v3
+    api_url: str = ""
     repos: list[RepoConfig] = []
 
 
@@ -83,6 +88,11 @@ class AnalysisConfig(BaseModel):
 
 
 class NetworkConfig(BaseModel):
+    # Set True to skip SSL certificate verification globally.
+    # Useful for corporate environments with self-signed / custom CA certs.
+    # Can be overridden per-service via github.verify_ssl and ai.private.verify_ssl.
+    verify_ssl: bool = True
+
     # When True, blocks calls to public cloud services only:
     #   - Anthropic API (api.anthropic.com)
     #   - Public GitHub (github.com)
@@ -109,9 +119,10 @@ class AppConfig(BaseModel):
 # -- Loader ---------------------------------------------------------------------
 
 _CONFIG_PATHS = [
+    Path("/app/config_rw/config.yaml"),  # writable volume -- UI saves here
     Path("config/config.yaml"),
     Path("../config/config.yaml"),
-    Path("/app/config/config.yaml"),
+    Path("/app/config/config.yaml"),     # read-only mount -- shipped defaults
 ]
 
 
@@ -180,16 +191,35 @@ def get_config() -> AppConfig:
         resolved.setdefault("github", {})["token"] = _env("GITHUB_TOKEN")
     if _env("GITHUB_TYPE"):
         resolved.setdefault("github", {})["type"] = _env("GITHUB_TYPE")
-    # GitHub Enterprise: if GITHUB_ENTERPRISE_URL is set, inject it into the first repo
+    # GitHub Enterprise API URL: https://github.mycompany.com/api/v3
+    if _env("GITHUB_API_URL"):
+        resolved.setdefault("github", {})["api_url"] = _env("GITHUB_API_URL")
     if _env("GITHUB_ENTERPRISE_URL"):
         repos = resolved.setdefault("github", {}).setdefault("repos", [])
         if repos:
             repos[0]["url"] = _env("GITHUB_ENTERPRISE_URL")
+        # Auto-derive api_url from enterprise URL if not explicitly set
+        if not _env("GITHUB_API_URL"):
+            parts = _env("GITHUB_ENTERPRISE_URL").split("/")
+            base = "/".join(parts[:3])  # https://github.mycompany.com
+            resolved["github"]["api_url"] = base.rstrip("/") + "/api/v3"
 
     # -- Network / isolation --
     # Support PRIVATE_ONLY_MODE and legacy ISOLATED_MODE
     if _bool_env("PRIVATE_ONLY_MODE") or _bool_env("ISOLATED_MODE"):
         resolved.setdefault("network", {})["private_only_mode"] = True
+
+    # -- SSL verification --
+    # VERIFY_SSL=false disables SSL verification globally (custom CA / self-signed certs)
+    # GITHUB_VERIFY_SSL=false disables it only for GitHub calls
+    if _env("VERIFY_SSL"):
+        val = not _env("VERIFY_SSL").lower() in ("0", "false", "no")
+        resolved.setdefault("network", {})["verify_ssl"] = val
+        resolved.setdefault("github", {})["verify_ssl"] = val
+        resolved.setdefault("ai", {}).setdefault("private", {})["verify_ssl"] = val
+    if _env("GITHUB_VERIFY_SSL"):
+        val = not _env("GITHUB_VERIFY_SSL").lower() in ("0", "false", "no")
+        resolved.setdefault("github", {})["verify_ssl"] = val
 
     return AppConfig(**resolved)
 

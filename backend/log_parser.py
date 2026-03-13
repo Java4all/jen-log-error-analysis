@@ -669,11 +669,11 @@ def build_analysis_prompt(
 ) -> tuple[str, str]:
     """Returns (system_prompt, user_prompt) for AI analysis."""
 
-    system = """You are an expert Jenkins CI/CD performance engineer. 
-You analyze build pipeline performance data from log files and source code.
-Your job is to identify bottlenecks, explain root causes, and provide specific, actionable recommendations.
-Always reference exact method names and times. Be concise but precise.
-Format responses in markdown with clear sections."""
+    system = """You are an expert Jenkins CI/CD performance engineer with deep knowledge of Groovy, Jenkins Shared Libraries, Maven, Gradle, Docker, and npm build tooling.
+You analyze build pipeline performance data from log files and optionally Groovy source code.
+Your job: identify bottlenecks, explain WHY each is slow (I/O wait, sequential calls that could be parallel, unnecessary steps, large artifact transfers), and give specific actionable fixes.
+Always reference exact method names and measured times. If Groovy source code is provided, reference specific lines.
+Format in markdown with clear sections."""
 
     timing_table = "\n".join(
         f"  {s.name}: total={s.total}s avg={s.avg}s calls={s.calls} max={s.max}s p95={s.p95}s"
@@ -800,11 +800,12 @@ Be precise: quote log lines and source code line numbers. Format in markdown."""
 ```
 
 Please provide:
-1. **Root Cause** -- The single most likely root cause, stated plainly
-2. **Failure Chain** -- Step-by-step: what called what, where it broke
-3. **Method-Level Analysis** -- For each implicated method{' (with source code where provided)' if error_source_context else ''}: what it does and why it failed
-4. **Fix** -- Specific code/config change to resolve this failure
-5. **Prevention** -- How to catch this class of failure earlier (tests, checks, monitoring)
+1. **Root Cause** -- One sentence: exact cause (e.g. "NullPointerException in docker() at Deploy.groovy:47 because imageTag was not set")
+2. **Failure Chain** -- Step-by-step call trace correlating stack frames with Groovy source where available
+3. **Source Code Analysis** -- Quote the specific Groovy lines that caused the failure and explain why{'' if not error_source_context else '. Map each stack frame to its source line.'}
+4. **Fix** -- Exact change needed (Groovy snippet, config value, or environment variable)
+5. **Is this transient?** -- Network/Docker/credentials flakiness vs real bug? What would confirm it?
+6. **Prevention** -- One specific test or check to catch this earlier
 """
     return system, user
 
@@ -921,11 +922,12 @@ def split_into_batches(
 
 def build_batch_prompt(batch: LogBatch) -> tuple[str, str]:
     """Build (system, user) prompt for a single batch."""
-    system = """You are an expert Jenkins CI/CD performance engineer analyzing one segment of a large build log.
-You will receive a global summary of the entire build plus detailed data for a specific subset of stages.
-Be concise -- your output will be merged with analyses of other segments.
-Focus on facts: exact method names, times, and specific actionable observations for THIS segment only.
-Format in markdown."""
+    system = """You are an expert Jenkins CI/CD performance engineer with knowledge of Groovy and Jenkins Shared Libraries.
+You are analysing one segment of a large build log. Your output will be merged with analyses of other segments.
+Be concise and factual: exact method names, times, error messages. Do NOT repeat the raw numbers already in the data.
+Look for: slow methods, errors/exceptions, retry loops, Docker pull delays, credential issues, network timeouts.
+If log lines contain Groovy stack traces, identify the failing method and likely cause.
+Format in markdown, short."""
 
     timing_table = "\n".join(
         f"  {s.name}: total={s.total}s avg={s.avg}s calls={s.calls} max={s.max}s"
@@ -954,11 +956,11 @@ Format in markdown."""
 {batch.log_lines_excerpt}
 ```
 
-Provide for THIS SEGMENT ONLY:
-1. **Segment Summary** -- 1-2 sentences on this segment's health
-2. **Bottlenecks** -- slowest methods with specific observations
-3. **Anomalies** -- errors, retries, unexpected patterns in the log lines
-4. **Stage Notes** -- per-stage observations
+Provide for THIS SEGMENT ONLY (be brief, max 300 words):
+1. **Health** -- one sentence verdict (OK / SLOW / ERRORS)
+2. **Bottlenecks** -- top 1-3 slowest methods, why they might be slow
+3. **Errors/Anomalies** -- any exceptions, failures, retries, or suspicious patterns with the log line quoted
+4. **Key Observation** -- one most important thing about this segment
 """
     return system, user
 
@@ -1007,9 +1009,12 @@ Format in markdown with clear sections."""
 {segments_text}
 
 Provide:
-1. **Executive Summary** -- 3-4 sentences on overall pipeline health
-2. **Critical Bottlenecks** -- Top 5 issues across all segments, ranked by impact
-3. **Cross-Segment Patterns** -- Systemic issues appearing in multiple segments
-4. **Optimization Roadmap** -- Numbered action items, prioritized by ROI
+1. **Executive Summary** -- 2-3 sentences on overall build health and outcome
+2. **Root Cause Chain** -- If errors occurred: trace failure back across segments. Did something in an early segment cause a later failure? Explicit cross-segment causality.
+3. **Critical Bottlenecks** -- Top 5 slowest/most impactful issues ranked by severity
+4. **Cross-Segment Patterns** -- Systemic issues repeating across multiple segments (slow Docker pulls, repeated auth failures, consistent method variance)
+5. **Stage Health Overview** -- Per stage: name, duration, verdict (OK/SLOW/ERROR), one-line note
+6. **Optimization Roadmap** -- Numbered action items prioritised by ROI
+7. **Stability Risks** -- High-variance methods or patterns suggesting flakiness
 """
     return system, user

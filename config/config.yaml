@@ -19,7 +19,7 @@ ai:
   ollama:
     base_url: "http://localhost:11434"
     model: "codellama:13b"
-    timeout: 120           # per-batch call timeout (seconds)
+    timeout: 300           # per-batch call timeout (seconds) -- increase for slow CPU models
     synthesis_timeout: 600 # synthesis call timeout -- larger prompt needs more time
 
   # Private / enterprise OpenAI-compatible endpoint
@@ -33,9 +33,15 @@ ai:
 # -- GitHub Integration --------------------------------------------------------
 github:
   # Options: "public" | "private"
-  type: "public"
+  type: "public"          # public | private
   token: ""               # or set env: GITHUB_TOKEN (required for private)
   timeout: 30
+  verify_ssl: true        # set false for GitHub Enterprise with self-signed / custom CA certs
+  # GitHub Enterprise API base URL.
+  # Leave empty for public github.com.
+  # For GitHub Enterprise set to: https://github.mycompany.com/api/v3
+  # Env var: GITHUB_API_URL=https://github.mycompany.com/api/v3
+  api_url: ""
 
   # Source repos for code-correlation analysis
   # Each repo's source files will be parsed to extract method signatures
@@ -109,6 +115,10 @@ network:
   #
   # Activate via this flag or env var: PRIVATE_ONLY_MODE=true
   # Legacy env var ISOLATED_MODE=true also works.
+  # Set false to skip SSL certificate verification (custom CA / self-signed certs).
+  # Also configurable per-service: github.verify_ssl and ai.private.verify_ssl
+  # Env vars: VERIFY_SSL=false (global)  or  GITHUB_VERIFY_SSL=false (GitHub only)
+  verify_ssl: true
   private_only_mode: false
 
   # Batch processing for large logs (10k+ lines)
