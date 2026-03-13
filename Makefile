@@ -17,6 +17,8 @@ COMPOSE_ISOLATED_GPU    = docker compose -f docker-compose.yml -f docker-compose
 # Host-native Ollama (Ollama runs on Mac/Linux host, not in Docker)
 COMPOSE_HOST_OLLAMA          = docker compose -f docker-compose.yml -f docker-compose.host-ollama.yml
 COMPOSE_PREBUILT_HOST_OLLAMA = docker compose -f docker-compose.yml -f docker-compose.prebuilt.yml -f docker-compose.host-ollama.yml
+# Mac + host Ollama, no build, no registry — standalone file uses local image names directly
+COMPOSE_MAC_OLLAMA           = docker compose -f docker-compose.mac-ollama.yml
 
 .PHONY: help setup up up-ollama up-gpu down down-ollama down-gpu \
         up-ollama-isolated up-gpu-isolated down-isolated \
@@ -49,6 +51,7 @@ help:
 	@echo "  make down-ollama     stop"
 	@echo ""
 	@echo "  Host-native Ollama (Ollama installed on your Mac/Linux, not in Docker):"
+	@echo "  make up-mac-ollama           start using local images + host Ollama (no build)"
 	@echo "  make up-host-ollama          build + start API + frontend, use host Ollama"
 	@echo "  make up-prebuilt-host-ollama pull pre-built images + use host Ollama"
 	@echo "  make down-host-ollama        stop"
@@ -133,6 +136,33 @@ up-host-ollama: setup
 
 down-host-ollama:
 	$(COMPOSE_HOST_OLLAMA) down
+
+# -- Mac + host Ollama, no build, no registry --------------------------------
+up-mac-ollama: ## Start using already-built local images + Mac host Ollama (no docker build)
+	@echo "[>]  Starting stack (local images + host Ollama, no build)..."
+	@if curl -sf --max-time 3 http://localhost:$$(grep OLLAMA_PORT .env 2>/dev/null | cut -d= -f2 || echo 11434)/api/tags > /dev/null 2>&1; then \
+		echo "[OK]  Host Ollama is reachable"; \
+		MODELS=$$(curl -sf http://localhost:$$(grep OLLAMA_PORT .env 2>/dev/null | cut -d= -f2 || echo 11434)/api/tags 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(', '.join(m['name'] for m in d.get('models',[])))" 2>/dev/null || echo "unknown"); \
+		echo "       Models available: $$MODELS"; \
+	else \
+		echo "[!]  WARNING: Ollama not responding on host."; \
+		echo "     Start it with: OLLAMA_HOST=0.0.0.0 ollama serve"; \
+		echo "     Then try again, or set the URL in the app Config tab."; \
+	fi
+	@if ! docker image inspect jenkins-analyzer-api:latest > /dev/null 2>&1; then \
+		echo "[!]  Image jenkins-analyzer-api:latest not found."; \
+		echo "     Build it first with: docker compose build"; \
+		exit 1; \
+	fi
+	$(COMPOSE_MAC_OLLAMA) up -d
+	@echo ""
+	@echo "[OK]  Stack running (no build, host Ollama):"
+	@echo "    Frontend  -> http://localhost:$$(grep FRONTEND_PORT .env 2>/dev/null | cut -d= -f2 || echo 3000)"
+	@echo "    API docs  -> http://localhost:$$(grep API_PORT .env 2>/dev/null | cut -d= -f2 || echo 8000)/docs"
+	@echo "    Ollama    -> http://host.docker.internal (your Mac)"
+
+down-mac-ollama:
+	$(COMPOSE_MAC_OLLAMA) down
 
 # -- Local Ollama, GPU mode --------------------------------------------------
 up-gpu: setup

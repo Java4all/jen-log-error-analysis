@@ -1,0 +1,99 @@
+# -----------------------------------------------------------------------------
+# Mac + Host Ollama — standalone compose file
+#
+# For running the pre-built local images with Ollama installed on your Mac.
+# No registry, no IMAGE_REGISTRY variable, no docker build required.
+#
+# Prerequisites
+# -------------
+#   1. Build images once (only needed the very first time):
+#        docker compose build
+#
+#   2. Ollama running on your Mac with all-interface binding:
+#        OLLAMA_HOST=0.0.0.0 ollama serve
+#
+#   3. At least one model pulled:
+#        ollama pull llama3.2:3b       # fast, good for most use
+#        ollama pull codellama:13b     # better for code analysis
+#
+# Usage
+# -----
+#   Start:   docker compose -f docker-compose.mac-ollama.yml up -d
+#   Stop:    docker compose -f docker-compose.mac-ollama.yml down
+#   Logs:    docker compose -f docker-compose.mac-ollama.yml logs -f
+#
+#   Or just:  bash setup.sh  →  option [3]  (Host Ollama, no build)
+#             make up-mac-ollama
+#
+# Configuration
+# -------------
+#   Edit config/config.yaml to set:
+#     ai.provider: ollama
+#     ai.ollama.model: llama3.2:3b   (or whatever you have pulled)
+#
+#   Or set env vars in a .env file:
+#     OLLAMA_MODEL=llama3.2:3b
+#     FRONTEND_PORT=3000
+#     API_PORT=8000
+# -----------------------------------------------------------------------------
+
+name: jenkins-analyzer
+
+services:
+
+  api:
+    image: jenkins-analyzer-api:latest   # built by: docker compose build
+    container_name: jenkins-analyzer-api
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - ./config:/app/config:ro
+      - config_data:/app/config_rw
+    environment:
+      - AI_PROVIDER=ollama
+      - OLLAMA_BASE_URL=http://host.docker.internal:${OLLAMA_PORT:-11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2:3b}
+      - OLLAMA_TIMEOUT=${OLLAMA_TIMEOUT:-300}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - PRIVATE_AI_BASE_URL=${PRIVATE_AI_BASE_URL:-}
+      - PRIVATE_AI_API_KEY=${PRIVATE_AI_API_KEY:-}
+      - PRIVATE_AI_MODEL=${PRIVATE_AI_MODEL:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITHUB_TYPE=${GITHUB_TYPE:-public}
+      - PRIVATE_ONLY_MODE=${PRIVATE_ONLY_MODE:-false}
+      - VERIFY_SSL=${VERIFY_SSL:-true}
+    # host.docker.internal is built into Docker Desktop on Mac.
+    # The extra_hosts line makes it work on Linux too if needed.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - analyzer-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "--noproxy", "localhost", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  frontend:
+    image: jenkins-analyzer-frontend:latest   # built by: docker compose build
+    container_name: jenkins-analyzer-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/app.conf:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - analyzer-net
+
+networks:
+  analyzer-net:
+    driver: bridge
+
+volumes:
+  config_data:
+    driver: local

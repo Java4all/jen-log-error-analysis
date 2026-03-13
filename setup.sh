@@ -42,8 +42,9 @@ echo   ""
 echo   "  [2]  Dockerized Ollama, CPU  (Mac, Linux, any machine)"
 echo   "       Runs Ollama in Docker on CPU. First run pulls model."
 echo   ""
-echo   "  [3]  Host Ollama  (Mac native -- Ollama runs on your Mac, not Docker)"
-echo   "       Fastest setup on Mac. No Docker Ollama container."
+echo   "  [3]  Host Ollama, no build  (Mac recommended)"
+echo   "       Uses already-built local images + Ollama on your Mac."
+echo   "       No docker build. No registry. Fastest way to start on Mac."
 echo   "       Requires: OLLAMA_HOST=0.0.0.0 ollama serve"
 echo   ""
 echo   "  [4]  Dockerized Ollama, GPU  (Linux / Windows NVIDIA only)"
@@ -58,14 +59,15 @@ echo   ""
 echo   "  --- Pre-built images (pull from registry, no build required) ---"
 echo   "  [7]  Pre-built, cloud AI        (IMAGE_REGISTRY in .env required)"
 echo   "  [8]  Pre-built, Dockerized Ollama CPU"
-echo   "  [9]  Pre-built, host Ollama     (Mac native -- recommended)"
+echo   "  [9]  Pre-built, host Ollama     (IMAGE_REGISTRY in .env required)"
 echo   "  [10] Pre-built, isolated        (private-only mode + Ollama CPU)"
+echo   "  [11] Pre-built, host Ollama     (no registry -- uses local images on this machine)"
 echo   ""
 echo   "  --- Utilities ---------------------------------------------------"
-echo   "  [11] Stop all containers"
-echo   "  [12] Show container status"
-echo   "  [13] Tail logs"
-echo   "  [14] Open app in browser"
+echo   "  [12] Stop all containers"
+echo   "  [13] Show container status"
+echo   "  [14] Tail logs"
+echo   "  [15] Open app in browser"
 echo   "  [q]  Quit"
 echo   ""
 read -p "  Enter choice: " CHOICE
@@ -86,10 +88,20 @@ case "$CHOICE" in
         echo ""; ok "Open: http://localhost:$FP"
         ;;
     3)
-        header "Starting with host-native Ollama (Mac recommended)..."
-        info "Using Ollama running on your Mac -- no Docker Ollama container."
+        header "Starting with host-native Ollama (no build, Mac recommended)..."
+        info "Uses your already-built local Docker images + Ollama on your Mac."
+        info "No docker build step. No registry needed."
         echo ""
-        # Check if Ollama is running on host
+        # Step 1: Check images exist
+        if ! docker image inspect jenkins-analyzer-api:latest > /dev/null 2>&1; then
+            warn "Image jenkins-analyzer-api:latest not found."; 
+            info "Build it once first:"; info "   docker compose build"
+            info "Then re-run this option."
+            exit 1
+        fi
+        ok "Docker images found"
+        echo ""
+        # Step 2: Check Ollama is running with correct binding
         OLLAMA_PORT_VAL=$(get_port OLLAMA_PORT 11434)
         if curl -sf --max-time 3 http://localhost:$OLLAMA_PORT_VAL/api/tags > /dev/null 2>&1; then
             ok "Host Ollama is running on port $OLLAMA_PORT_VAL"
@@ -97,11 +109,18 @@ case "$CHOICE" in
             info "Available models: $MODELS"
         else
             warn "Ollama not detected on port $OLLAMA_PORT_VAL"
-            warn "Start it with: OLLAMA_HOST=0.0.0.0 ollama serve"
-            warn "Continuing anyway -- configure the URL in the Config tab if needed."
+            echo ""
+            info "Start Ollama on your Mac with all-interface binding:";
+            info "   OLLAMA_HOST=0.0.0.0 ollama serve"
+            info ""
+            info "Or add to your ~/.zshrc to make it permanent:";
+            info "   export OLLAMA_HOST=0.0.0.0"
+            echo ""
+            read -p "  Ollama not running. Continue anyway? [y/N] " CONT
+            [ "$CONT" = "y" ] || exit 0
         fi
         echo ""
-        make up-host-ollama
+        docker compose -f docker-compose.mac-ollama.yml up -d
         FP=$(get_port FRONTEND_PORT 3000)
         echo ""; ok "Open: http://localhost:$FP"
         ;;
@@ -189,22 +208,42 @@ case "$CHOICE" in
         echo ""; ok "Open: http://localhost:$FP"
         ;;
     11)
+        header "Starting pre-built local images with host Ollama (no registry)..."
+        info "Uses images already on this machine + Ollama running on your Mac."
+        info "No docker build. No IMAGE_REGISTRY required."
+        echo ""
+        OLLAMA_PORT_VAL=$(get_port OLLAMA_PORT 11434)
+        if curl -sf --max-time 3 http://localhost:$OLLAMA_PORT_VAL/api/tags > /dev/null 2>&1; then
+            ok "Host Ollama is running on port $OLLAMA_PORT_VAL"
+            MODELS=$(curl -sf http://localhost:$OLLAMA_PORT_VAL/api/tags 2>/dev/null \
+              | python3 -c "import sys,json; d=json.load(sys.stdin); print(', '.join(m['name'] for m in d.get('models',[])))" \
+              2>/dev/null || echo "unknown")
+            info "Available models: $MODELS"
+        else
+            warn "Ollama not detected -- start with: OLLAMA_HOST=0.0.0.0 ollama serve"
+        fi
+        docker compose -f docker-compose.mac-ollama.yml up -d
+        FP=$(get_port FRONTEND_PORT 3000)
+        echo ""; ok "Open: http://localhost:$FP"
+        ;;
+    12)
         header "Stopping all containers..."
         docker compose down
         docker compose --profile ollama down 2>/dev/null || true
         make down-isolated 2>/dev/null || true
         make down-host-ollama 2>/dev/null || true
+        docker compose -f docker-compose.mac-ollama.yml down 2>/dev/null || true
         ok "Done."
         ;;
-    12)
+    13)
         header "Container status"
         docker compose ps
         ;;
-    13)
+    14)
         header "Tailing logs (Ctrl+C to stop)..."
         docker compose logs -f
         ;;
-    14)
+    15)
         FP=$(get_port FRONTEND_PORT 3000)
         URL="http://localhost:$FP"
         header "Opening $URL"
